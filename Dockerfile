@@ -1,3 +1,10 @@
+FROM node:18-bullseye AS frontend-builder
+WORKDIR /tmp/src/front
+COPY front/package.json front/package-lock.json* ./
+RUN npm install
+COPY front/ .
+RUN npm run build-prod
+
 FROM golang:1.23-bullseye AS backend-builder
 RUN apt update && apt install -y liblz4-dev
 WORKDIR /tmp/src
@@ -5,6 +12,7 @@ COPY go.mod .
 COPY go.sum .
 RUN go mod download
 COPY . .
+COPY --from=frontend-builder /tmp/src/static ./static
 ARG VERSION=unknown
 RUN go build -mod=readonly -ldflags "-X main.version=$VERSION" -o coroot .
 

@@ -50,10 +50,6 @@ export const views = {
     dashboards: { name: 'Dashboards', icon: 'mdi-view-dashboard-outline' },
 };
 
-if (window.coroot.edition !== 'Enterprise') {
-    delete views.anomalies;
-}
-
 export default {
     props: {
         loading: Boolean,

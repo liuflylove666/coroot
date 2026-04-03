@@ -3,8 +3,7 @@
         <template #subtitle>{{ $utils.appId(appId).name }}</template>
 
         <v-alert v-if="rca === 'not implemented'" color="info" outlined text class="mt-5">
-            AI-powered Root Cause Analysis is available only in Coroot Enterprise (from $1 per CPU core/month).
-            <a href="https://coroot.com/account" target="_blank" class="font-weight-bold">Start</a> your free trial today.
+            Root Cause Analysis is not available for this project.
         </v-alert>
 
         <div v-else-if="rca">
@@ -77,6 +76,9 @@
             </div>
 
             <div v-else-if="rca.ai_integration_enabled">
+                <v-alert v-if="rca.error" color="red" icon="mdi-alert-circle-outline" outlined text class="mt-4">
+                    AI analysis failed: {{ rca.error }}
+                </v-alert>
                 <div class="pa-5" style="position: relative; border-radius: 4px">
                     <div style="filter: blur(5px)">
                         <v-skeleton-loader boilerplate type="article, text"></v-skeleton-loader>
@@ -84,8 +86,8 @@
 
                     <v-overlay absolute opacity="0.1" z-index="1">
                         <v-btn color="primary" @click="get('true')" class="mx-auto" :loading="loading">
-                            <v-icon small left>mdi-creation</v-icon>
-                            Investigate with AI
+                            <v-icon small left>mdi-magnify</v-icon>
+                            {{ rca.error ? 'Retry Analysis' : 'Investigate' }}
                         </v-btn>
                     </v-overlay>
                 </div>

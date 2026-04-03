@@ -46,13 +46,12 @@ type AuditReport struct {
 	checkConfigs CheckConfigs
 	detailed     bool
 
-	Name              AuditReportName    `json:"name"`
-	Status            Status             `json:"status"`
-	Widgets           []*Widget          `json:"widgets"`
-	Checks            []*Check           `json:"checks"`
-	Custom            bool               `json:"custom"`
-	Instrumentation   ApplicationType    `json:"instrumentation"`
-	ConfigurationHint *ConfigurationHint `json:"configuration_hint,omitempty"`
+	Name            AuditReportName `json:"name"`
+	Status          Status          `json:"status"`
+	Widgets         []*Widget       `json:"widgets"`
+	Checks          []*Check        `json:"checks"`
+	Custom          bool            `json:"custom"`
+	Instrumentation ApplicationType `json:"instrumentation"`
 }
 
 func NewAuditReport(app *Application, ctx timeseries.Context, checkConfigs CheckConfigs, name AuditReportName, detailed bool) *AuditReport {

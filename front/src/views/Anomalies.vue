@@ -150,7 +150,7 @@ export default {
                     this.error = error;
                     return;
                 }
-                this.anomalyApplications = data || [];
+                this.anomalyApplications = (data && data.anomalies) || [];
             });
         },
         setFilter(filter) {

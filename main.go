@@ -202,6 +202,7 @@ func main() {
 	r.HandleFunc("/api/project/{project}/integrations/{type}", a.Auth(a.Integration)).Methods(http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPost)
 	r.HandleFunc("/api/project/{project}/app/{app}", a.Auth(a.Application)).Methods(http.MethodGet)
 	r.HandleFunc("/api/project/{project}/app/{app}/rca", a.Auth(a.RCA)).Methods(http.MethodGet)
+	r.HandleFunc("/api/project/{project}/test-incident", a.Auth(a.TestIncident)).Methods(http.MethodPost)
 	r.HandleFunc("/api/project/{project}/app/{app}/inspection/{type}/config", a.Auth(a.Inspection)).Methods(http.MethodGet, http.MethodPost)
 	r.HandleFunc("/api/project/{project}/app/{app}/instrumentation/{type}", a.Auth(a.Instrumentation)).Methods(http.MethodGet, http.MethodPost)
 	r.HandleFunc("/api/project/{project}/app/{app}/profiling", a.Auth(a.Profiling)).Methods(http.MethodGet, http.MethodPost)
@@ -243,20 +244,8 @@ func main() {
 		klog.Exitln("grpc server:", err)
 	}
 
-	if !cfg.HTTPDisabled && cfg.HTTPSListenAddress != "" {
-		go func() {
-			klog.Infoln("listening on", cfg.HTTPSListenAddress, "(HTTPS)")
-			klog.Fatalln(http.ListenAndServeTLS(cfg.HTTPSListenAddress, cfg.TLS.CertFile, cfg.TLS.KeyFile, router))
-		}()
-		klog.Infoln("listening on", cfg.ListenAddress)
-		klog.Fatalln(http.ListenAndServe(cfg.ListenAddress, router))
-	} else if cfg.HTTPSListenAddress != "" {
-		klog.Infoln("listening on", cfg.HTTPSListenAddress, "(HTTPS)")
-		klog.Fatalln(http.ListenAndServeTLS(cfg.HTTPSListenAddress, cfg.TLS.CertFile, cfg.TLS.KeyFile, router))
-	} else if !cfg.HTTPDisabled {
-		klog.Infoln("listening on", cfg.ListenAddress)
-		klog.Fatalln(http.ListenAndServe(cfg.ListenAddress, router))
-	}
+	klog.Infoln("listening on", cfg.ListenAddress)
+	klog.Fatalln(http.ListenAndServe(cfg.ListenAddress, router))
 }
 
 func readIndexHtml(basePath, version, instanceUuid string, checkForUpdates bool, developerMode bool) []byte {

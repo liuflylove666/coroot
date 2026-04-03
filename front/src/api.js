@@ -306,7 +306,9 @@ export default class Api {
     }
 
     getRCA(appId, withSummary, cb) {
-        this.get(this.projectPath(`app/${encodeURIComponent(appId)}/rca`), { withSummary }, cb);
+        const { from, to, incident, alert, rcaFrom, rcaTo } = this.router.currentRoute.query;
+        const params = { withSummary, from, to, incident, alert, rcaFrom, rcaTo };
+        this.request({ method: 'get', url: this.projectPath(`app/${encodeURIComponent(appId)}/rca`), params, timeout: 300000 }, cb);
     }
 
     getInspectionConfig(appId, type, cb) {

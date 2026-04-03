@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coroot/coroot/ai"
 	"github.com/coroot/coroot/api/forms"
 	"github.com/coroot/coroot/api/views"
 	"github.com/coroot/coroot/auditor"
@@ -228,10 +229,37 @@ func (api *Api) SSO(w http.ResponseWriter, r *http.Request, u *db.User) {
 }
 
 func (api *Api) AI(w http.ResponseWriter, r *http.Request, u *db.User) {
-	res := struct {
-		Provider string `json:"provider"`
-	}{}
-	utils.WriteJson(w, res)
+	switch r.Method {
+	case http.MethodGet:
+		cfg, err := ai.GetConfig(api.db)
+		if err != nil {
+			klog.Errorln("failed to get AI config:", err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+		utils.WriteJson(w, cfg)
+
+	case http.MethodPost:
+		if !api.IsAllowed(u, rbac.Actions.Settings().Edit()) {
+			http.Error(w, "You are not allowed to edit settings.", http.StatusForbidden)
+			return
+		}
+		var cfg ai.Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			klog.Warningln("bad request:", err)
+			http.Error(w, "invalid data", http.StatusBadRequest)
+			return
+		}
+		if err := ai.SaveConfig(api.db, cfg); err != nil {
+			klog.Errorln("failed to save AI config:", err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+		utils.WriteJson(w, cfg)
+
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
 }
 
 func (api *Api) Project(w http.ResponseWriter, r *http.Request, u *db.User) {

@@ -283,15 +283,11 @@ export default {
                 { id: 'prometheus', name: 'Prometheus', disabled: disabled || this.multicluster },
                 { id: 'clickhouse', name: 'Clickhouse', disabled: disabled || this.multicluster },
                 { id: 'ai', name: 'AI' },
-                { id: 'cloud', name: 'Coroot Cloud' },
                 { id: 'aws', name: 'AWS', disabled },
                 { id: 'applications', name: 'Applications', disabled },
                 { id: 'notifications', name: 'Notifications', disabled },
                 { id: 'organization', name: 'Organization' },
             ];
-            if (this.$coroot.edition === 'Enterprise') {
-                tabs = tabs.filter((t) => t.id !== 'cloud');
-            }
             return tabs;
         },
     },
