@@ -1,0 +1,27 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="ibg" x1="0" y1="0" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0B1120"/>
+      <stop offset="100%" stop-color="#101B30"/>
+    </linearGradient>
+    <linearGradient id="ig" x1="20" y1="20" x2="100" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4ade80"/>
+      <stop offset="100%" stop-color="#22c55e"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="120" height="120" rx="24" fill="url(#ibg)"/>
+
+  <!-- Observability eye icon -->
+  <g transform="translate(60,48)">
+    <path d="M0 -8 C-16 -8 -28 0 -28 0 C-28 0 -16 8 0 8 C16 8 28 0 28 0 C28 0 16 -8 0 -8 Z" stroke="url(#ig)" stroke-width="3.5" fill="none" stroke-linejoin="round"/>
+    <circle cx="0" cy="0" r="9" fill="url(#ig)"/>
+    <circle cx="0" cy="0" r="4" fill="#0B1120"/>
+    <!-- Signal arcs -->
+    <path d="M-16 -16 A22 22 0 0 1 16 -16" stroke="#4ade80" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.45"/>
+    <path d="M-24 -24 A32 32 0 0 1 24 -24" stroke="#4ade80" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.25"/>
+  </g>
+
+  <!-- "OPS" text -->
+  <text x="60" y="95" text-anchor="middle" font-family="'SF Pro Display', 'Inter', 'Segoe UI', system-ui, sans-serif" font-size="22" font-weight="800" letter-spacing="4" fill="white">OPS</text>
+</svg>

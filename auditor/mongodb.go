@@ -1,0 +1,168 @@
+package auditor
+
+import (
+	"github.com/coroot/coroot/model"
+	"github.com/coroot/coroot/timeseries"
+	"github.com/coroot/coroot/utils"
+)
+
+func (a *appAuditor) mongodb() {
+	isMongo := a.app.ApplicationTypes()[model.ApplicationTypeMongodb]
+
+	if !isMongo && !a.app.IsMongodb() {
+		return
+	}
+
+	report := a.addReport(model.AuditReportMongodb)
+
+	report.Instrumentation = model.ApplicationTypeMongodb
+
+	if !a.app.IsMongodb() {
+		report.Status = model.UNKNOWN
+		return
+	}
+
+	availabilityCheck := report.CreateCheck(model.Checks.MongodbAvailability)
+	replicationLagCheck := report.CreateCheck(model.Checks.MongodbReplicationLag)
+
+	table := report.GetOrCreateTable("Instance", "Status", "ReplicaSet", "State", "Queries", "Latency", "Replication lag", "DB Size", "Version")
+	qpsChart := report.GetOrCreateChart("Queries, per second", nil)
+	latencyChart := report.GetOrCreateChart("Average latency, seconds", nil)
+	replicationLagChart := report.GetOrCreateChart("Replication lag, seconds", nil)
+	dbSizeChart := report.GetOrCreateChartGroup("Database size <selector>, bytes", nil)
+	collectionSizeChart := report.GetOrCreateChartGroup("Top collections by size <selector>, bytes", nil)
+	availabilityCheck.AddWidget(table.Widget())
+	replicationLagCheck.AddWidget(replicationLagChart.Widget())
+
+	primaryLastApplied := calcMongoPrimaryBaseline(a.app)
+
+	for _, i := range a.app.Instances {
+		if i.Mongodb == nil {
+			continue
+		}
+		obsolete := i.IsObsolete()
+		if !obsolete && !i.Mongodb.IsUp() {
+			availabilityCheck.AddItem(i.Name)
+		}
+
+		if obsolete {
+			continue
+		}
+		rs := i.Mongodb.ReplicaSet.Value()
+		var lag *timeseries.TimeSeries
+		lagCell := model.NewTableCell()
+
+		if rs != "" && !i.Mongodb.LastApplied.IsEmpty() {
+			if primary := primaryLastApplied[rs].Get(); !primary.IsEmpty() {
+				lag = timeseries.Sub(i.Mongodb.LastApplied, primary).MapInPlace(
+					func(t timeseries.Time, v float32) float32 {
+						if v < float32(a.w.Ctx.Step) {
+							return 0
+						}
+						return v
+					},
+				)
+			}
+		}
+		if !lag.IsEmpty() {
+			if lagTime := lag.Last(); !timeseries.IsNaN(lagTime) {
+				lagCell.SetValue(utils.FormatFloat(lagTime)).SetUnit("s")
+				if timeseries.Duration(lagTime) > timeseries.Duration(replicationLagCheck.Threshold) {
+					replicationLagCheck.AddItem(i.Name)
+				}
+			}
+			if replicationLagChart != nil {
+				replicationLagChart.AddSeries(i.Name, lag)
+			}
+		}
+
+		if dbSizeChart != nil {
+			dbSize := map[string]model.SeriesData{}
+			for db, ts := range i.Mongodb.DatabaseSize {
+				dbSize[db] = ts
+			}
+			dbSizeChart.GetOrCreateChart(i.Name).Stacked().Sorted().AddMany(dbSize, 20, timeseries.Max)
+		}
+		if collectionSizeChart != nil {
+			collSize := map[string]model.SeriesData{}
+			for k, ts := range i.Mongodb.CollectionSize {
+				collSize[k.String()] = ts
+			}
+			collectionSizeChart.GetOrCreateChart(i.Name).Sorted().AddMany(collSize, 20, timeseries.Max)
+		}
+
+		if table != nil {
+			name := model.NewTableCell(i.Name)
+			state := model.NewTableCell(i.Mongodb.State.Value())
+			switch i.Mongodb.State.Value() {
+			case "primary":
+				state.SetIcon("mdi-database-edit-outline", "rgba(0,0,0,0.87)")
+			case "secondary":
+				state.SetIcon("mdi-database-import-outline", "grey")
+			case "arbiter":
+				state.SetIcon("mdi-database-eye-outline", "grey")
+			}
+			status := model.NewTableCell().SetStatus(model.OK, "up")
+			if !i.Mongodb.IsUp() {
+				if v := i.Mongodb.Error.Value(); v != "" {
+					status.SetStatus(model.WARNING, v)
+				} else {
+					status.SetStatus(model.WARNING, "down (no metrics)")
+				}
+			} else {
+				if v := i.Mongodb.Warning.Value(); v != "" {
+					status.SetStatus(model.OK, v)
+				}
+			}
+
+			totalQps := timeseries.NewAggregate(timeseries.NanSum).Add(i.Requests.Ok, i.Requests.Failed).Get()
+			if qpsChart != nil {
+				qpsChart.AddSeries(i.Name, totalQps)
+			}
+			avgLatency := timeseries.Div(i.Requests.TotalLatency, totalQps)
+			if latencyChart != nil {
+				latencyChart.AddSeries(i.Name, avgLatency)
+			}
+			latencyCell := model.NewTableCell().SetUnit("ms")
+			if last := avgLatency.Last(); last > 0 {
+				latencyCell.SetValue(utils.FormatFloat(last * 1000))
+			}
+			table.AddRow(
+				name,
+				status,
+				model.NewTableCell(rs),
+				state,
+				model.NewTableCell(utils.FormatFloat(totalQps.Last())).SetUnit("/s"),
+				latencyCell,
+				lagCell,
+				dbSizeCell(i.Mongodb.DatabaseSize),
+				model.NewTableCell(i.Mongodb.Version.Value()))
+		}
+	}
+}
+
+func calcMongoPrimaryBaseline(app *model.Application) map[string]*timeseries.Aggregate {
+	res := map[string]*timeseries.Aggregate{}
+	for _, i := range app.Instances {
+		if i.Mongodb != nil && !i.Mongodb.LastApplied.IsEmpty() {
+			if rs := i.Mongodb.ReplicaSet.Value(); rs != "" {
+				p := res[rs]
+				if p == nil {
+					p = timeseries.NewAggregate(timeseries.Max)
+					res[rs] = p
+				}
+				v := timeseries.Mul(
+					i.Mongodb.LastApplied,
+					i.ClusterRole().Map(func(t timeseries.Time, v float32) float32 {
+						if v > 1 {
+							return 0
+						}
+						return v
+					}),
+				)
+				p.Add(v)
+			}
+		}
+	}
+	return res
+}
