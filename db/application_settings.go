@@ -61,6 +61,8 @@ func (db *DB) SaveApplicationSetting(projectId ProjectId, appId model.Applicatio
 		as.Instrumentation[v.Type] = v
 	case []model.RiskOverride:
 		as.RiskOverrides = v
+	case *model.ApplicationSettingsWeight:
+		as.Weight = &v.Weight
 	default:
 		return fmt.Errorf("unsupported type: %T", s)
 	}

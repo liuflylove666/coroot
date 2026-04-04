@@ -54,7 +54,9 @@ func studentTPDF(x, df, loc, scale float64) float64 {
 		return 0
 	}
 	z := (x - loc) / math.Sqrt(scale)
-	logCoeff := math.Lgamma((df+1)/2) - math.Lgamma(df/2) - 0.5*math.Log(df*math.Pi*scale)
+	lg1, _ := math.Lgamma((df + 1) / 2)
+	lg2, _ := math.Lgamma(df / 2)
+	logCoeff := lg1 - lg2 - 0.5*math.Log(df*math.Pi*scale)
 	logBody := -(df + 1) / 2 * math.Log(1+z*z/df)
 	return math.Exp(logCoeff + logBody)
 }

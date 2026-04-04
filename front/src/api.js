@@ -359,6 +359,10 @@ export default class Api {
         this.post(this.projectPath(`app/${encodeURIComponent(appId)}/risks`), form, cb);
     }
 
+    appWeight(appId, weight, cb) {
+        this.post(this.projectPath(`app/${encodeURIComponent(appId)}/weight`), { weight }, cb);
+    }
+
     prom() {
         return this.basePath + 'api/' + this.projectPath('prom');
     }

@@ -8,6 +8,22 @@ type ApplicationSettings struct {
 	Instrumentation map[ApplicationType]*ApplicationInstrumentation `json:"instrumentation,omitempty"`
 
 	RiskOverrides []RiskOverride `json:"risk_overrides,omitempty"`
+
+	Weight *float32 `json:"weight,omitempty"`
+}
+
+func (s *ApplicationSettings) GetWeight() float32 {
+	if s == nil || s.Weight == nil {
+		return 1
+	}
+	if *s.Weight < 0 {
+		return 0
+	}
+	return *s.Weight
+}
+
+type ApplicationSettingsWeight struct {
+	Weight float32 `json:"weight"`
 }
 
 type ApplicationSettingsProfiling struct {

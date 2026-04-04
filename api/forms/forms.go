@@ -261,6 +261,14 @@ func (f *ApplicationSettingsRisksForm) Valid() bool {
 	return true
 }
 
+type ApplicationSettingsWeightForm struct {
+	model.ApplicationSettingsWeight
+}
+
+func (f *ApplicationSettingsWeightForm) Valid() bool {
+	return f.Weight >= 0
+}
+
 type IntegrationsForm struct {
 	BaseUrl string `json:"base_url"`
 }

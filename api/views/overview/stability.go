@@ -56,6 +56,7 @@ type ServiceStability struct {
 	HasIncident        bool                      `json:"has_incident"`
 	Deployments        int                       `json:"deployments"`
 	TotalRequests      float64                   `json:"total_requests"`
+	Weight             float32                   `json:"weight"`
 }
 
 func renderStability(w *model.World) *Stability {
@@ -78,9 +79,12 @@ func renderStability(w *model.World) *Stability {
 			continue
 		}
 
+		appWeight := float64(app.Settings.GetWeight())
+
 		svc := &ServiceStability{
 			Id:       app.Id,
 			Category: app.Category,
+			Weight:   app.Settings.GetWeight(),
 		}
 
 		var svcTotal, svcFailed float64
@@ -94,8 +98,8 @@ func renderStability(w *model.World) *Stability {
 				avail := (total - failed) / total * 100
 				svc.Availability = formatAvailability(avail)
 				svc.TotalRequests = total
-				totalReqs += total
-				failedReqs += failed
+				totalReqs += total * appWeight
+				failedReqs += failed * appWeight
 			}
 			remaining := computeErrorBudgetRemaining(sli.Config.ObjectivePercentage, total, failed)
 			svc.ErrorBudget = fmt.Sprintf("%.1f%%", remaining)
@@ -107,8 +111,8 @@ func renderStability(w *model.World) *Stability {
 			if lat > 0 {
 				svc.Latency = utils.FormatLatency(lat)
 				if svcTotal > 0 {
-					weightedLatencySum += float64(lat) * svcTotal
-					latencyWeightSum += svcTotal
+					weightedLatencySum += float64(lat) * svcTotal * appWeight
+					latencyWeightSum += svcTotal * appWeight
 				}
 			}
 		}

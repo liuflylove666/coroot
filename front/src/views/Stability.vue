@@ -134,6 +134,33 @@
                     <template #item.deployments="{ item }">
                         {{ item.deployments || 0 }}
                     </template>
+                    <template #item.weight="{ item }">
+                        <div class="weight-cell">
+                            <span v-if="editingWeight !== item.id" class="weight-value" @click="startEditWeight(item)">
+                                {{ item.weight != null ? item.weight : 1 }}
+                            </span>
+                            <div v-else class="weight-edit">
+                                <v-text-field
+                                    v-model.number="weightValue"
+                                    type="number"
+                                    dense
+                                    hide-details
+                                    min="0"
+                                    step="0.1"
+                                    class="weight-input"
+                                    @keydown.enter="saveWeight(item)"
+                                    @keydown.esc="cancelEditWeight"
+                                    autofocus
+                                />
+                                <v-btn x-small icon color="green" @click="saveWeight(item)" :loading="savingWeight">
+                                    <v-icon x-small>mdi-check</v-icon>
+                                </v-btn>
+                                <v-btn x-small icon @click="cancelEditWeight">
+                                    <v-icon x-small>mdi-close</v-icon>
+                                </v-btn>
+                            </div>
+                        </div>
+                    </template>
                 </v-data-table>
             </div>
         </div>
@@ -154,6 +181,9 @@ export default {
             stability: null,
             loading: false,
             error: '',
+            editingWeight: null,
+            weightValue: 1,
+            savingWeight: false,
         };
     },
 
@@ -172,6 +202,7 @@ export default {
                 { value: 'error_budget', text: 'Error Budget', sortable: false, align: 'end' },
                 { value: 'has_incident', text: 'Incident', sortable: false, align: 'center' },
                 { value: 'deployments', text: 'Deploys', sortable: false, align: 'end' },
+                { value: 'weight', text: 'Weight', sortable: false, align: 'center' },
             ];
         },
         complianceColor() {
@@ -222,6 +253,28 @@ export default {
             if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
             if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
             return Math.round(n).toString();
+        },
+        startEditWeight(item) {
+            this.editingWeight = item.id;
+            this.weightValue = item.weight != null ? item.weight : 1;
+        },
+        cancelEditWeight() {
+            this.editingWeight = null;
+        },
+        saveWeight(item) {
+            const weight = parseFloat(this.weightValue);
+            if (isNaN(weight) || weight < 0) return;
+            this.savingWeight = true;
+            this.$api.appWeight(item.id, weight, (data, error) => {
+                this.savingWeight = false;
+                this.editingWeight = null;
+                if (error) {
+                    this.error = error;
+                    return;
+                }
+                item.weight = weight;
+                this.get();
+            });
         },
     },
 };
@@ -373,5 +426,25 @@ export default {
 .north-star-title {
     display: flex;
     align-items: center;
+}
+.weight-cell {
+    min-width: 80px;
+}
+.weight-value {
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+.weight-value:hover {
+    background: rgba(128, 128, 128, 0.15);
+}
+.weight-edit {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+.weight-input {
+    max-width: 70px;
 }
 </style>

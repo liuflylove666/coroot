@@ -2180,6 +2180,35 @@ func (api *Api) Risks(w http.ResponseWriter, r *http.Request, u *db.User) {
 	}
 }
 
+func (api *Api) AppWeight(w http.ResponseWriter, r *http.Request, u *db.User) {
+	projectId := mux.Vars(r)["project"]
+	appId, err := GetApplicationId(r)
+	if err != nil {
+		klog.Warningln(err)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	if !api.IsAllowed(u, rbac.Actions.Project(projectId).Inspections().Edit()) {
+		http.Error(w, "You are not allowed to configure application weight.", http.StatusForbidden)
+		return
+	}
+	var form forms.ApplicationSettingsWeightForm
+	if err := forms.ReadAndValidate(r, &form); err != nil {
+		klog.Warningln("bad request:", err)
+		http.Error(w, "invalid data", http.StatusBadRequest)
+		return
+	}
+	if err := api.db.SaveApplicationSetting(db.ProjectId(projectId), appId, &form.ApplicationSettingsWeight); err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+}
+
 func (api *Api) Node(w http.ResponseWriter, r *http.Request, u *db.User) {
 	vars := mux.Vars(r)
 	projectId := vars["project"]
