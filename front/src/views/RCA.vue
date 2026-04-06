@@ -30,7 +30,7 @@
             </template>
 
             <!-- ===== Structured RCA Results (builtin analysis) ===== -->
-            <div v-if="rca.summary && hasCausalData" class="rca-results mt-5">
+            <div v-if="rca.summary && (hasCausalData || hasDependencyPeers)" class="rca-results mt-5">
 
                 <!-- Summary Banner -->
                 <div class="summary-banner" v-if="topFinding">
@@ -50,8 +50,49 @@
                     </div>
                 </div>
 
+                <!-- Dependency graph context (from service map) -->
+                <v-row v-if="hasDependencyPeers" class="mt-3">
+                    <v-col cols="12">
+                        <div class="panel dep-peers-panel">
+                            <div class="panel-hd">
+                                <v-icon small class="mr-1" color="teal">mdi-graph-outline</v-icon>
+                                <span class="panel-t">依赖图上下文</span>
+                                <span class="panel-sub">来自服务地图的上下游</span>
+                                <router-link
+                                    :to="{ name: 'overview', params: { view: 'map' }, query: $utils.contextQuery() }"
+                                    class="dep-peers-map-link ml-2"
+                                >
+                                    打开服务地图<v-icon x-small class="ml-1">mdi-open-in-new</v-icon>
+                                </router-link>
+                            </div>
+                            <div class="dep-peers-table-wrap">
+                                <table class="dep-peers-tbl">
+                                    <thead>
+                                        <tr>
+                                            <th>方向</th>
+                                            <th>服务</th>
+                                            <th>应用状态</th>
+                                            <th>连接</th>
+                                            <th>说明</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="(p, i) in rca.summary.dependency_peers" :key="i">
+                                            <td><span class="dep-dir">{{ p.direction }}</span></td>
+                                            <td class="dep-name">{{ p.name }}</td>
+                                            <td><span class="dep-st" :class="'dep-st-' + (p.app_status || 'unknown')">{{ p.app_status || '—' }}</span></td>
+                                            <td><span class="dep-st" :class="'dep-st-' + (p.connection_status || 'unknown')">{{ p.connection_status || '—' }}</span></td>
+                                            <td class="dep-hint">{{ p.connection_hint || '—' }}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </v-col>
+                </v-row>
+
                 <!-- Two-column analysis -->
-                <v-row class="mt-4">
+                <v-row class="mt-4" v-if="hasCausalData">
                     <!-- Left: Causal Findings -->
                     <v-col cols="12" md="6">
                         <div class="panel">
@@ -314,6 +355,9 @@ export default {
         hasCausalData() {
             return this.rca && this.rca.summary && this.rca.summary.causal_findings && this.rca.summary.causal_findings.length > 0;
         },
+        hasDependencyPeers() {
+            return this.rca && this.rca.summary && this.rca.summary.dependency_peers && this.rca.summary.dependency_peers.length > 0;
+        },
         hasRelatedLogs() {
             return this.rca && this.rca.summary && this.rca.summary.related_logs && this.rca.summary.related_logs.length > 0;
         },
@@ -402,6 +446,9 @@ export default {
             if (cat === 'Traces') return this.appReport('Tracing');
             if (cat === 'Deployment') return this.appReport('Deployments');
             if (cat === 'Kubernetes') return this.appReport('Instances');
+            if (cat === 'Dependency') {
+                return { name: 'overview', params: { view: 'map' }, query: this.$utils.contextQuery() };
+            }
             if (cat === 'Anomaly') return this.appReport('SLO');
             return null;
         },
@@ -416,6 +463,7 @@ export default {
             if (cat === 'Logs') return 'mdi-text-box-search-outline';
             if (cat === 'Traces') return 'mdi-transit-connection-variant';
             if (cat === 'Deployment') return 'mdi-rocket-launch';
+            if (cat === 'Dependency') return 'mdi-graph-outline';
             return 'mdi-open-in-new';
         },
         findingLinkLabel(f) {
@@ -429,6 +477,7 @@ export default {
             if (cat === 'Logs') return '查看日志详情';
             if (cat === 'Traces') return '查看链路追踪';
             if (cat === 'Deployment') return '查看部署详情';
+            if (cat === 'Dependency') return '查看服务地图';
             if (cat === 'Anomaly') return '查看SLO指标';
             return '查看详情';
         },
@@ -518,6 +567,57 @@ export default {
     padding: 2px 8px;
     border-radius: 10px;
     letter-spacing: 0.5px;
+}
+
+.dep-peers-map-link {
+    font-size: 12px;
+    text-decoration: none;
+    color: #26a69a !important;
+    display: inline-flex;
+    align-items: center;
+    margin-left: 8px;
+}
+.dep-peers-table-wrap {
+    overflow-x: auto;
+    padding: 0 12px 12px;
+}
+.dep-peers-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.dep-peers-tbl th,
+.dep-peers-tbl td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+}
+.dep-peers-tbl th {
+    color: grey;
+    font-weight: 600;
+    font-size: 11px;
+}
+.dep-dir {
+    text-transform: capitalize;
+}
+.dep-name {
+    font-weight: 500;
+    font-size: 12px;
+}
+.dep-hint {
+    color: grey;
+    font-size: 11px;
+    max-width: 280px;
+}
+.dep-st-critical {
+    color: #ef5350;
+    font-weight: 600;
+}
+.dep-st-warning {
+    color: #ffa726;
+}
+.dep-st-ok {
+    color: #66bb6a;
 }
 
 /* ===== Findings list ===== */

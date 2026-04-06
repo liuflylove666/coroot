@@ -18,6 +18,16 @@ type IncidentDetails struct {
 	LatencyImpact         Impact     `json:"latency_impact"`
 }
 
+// RCADependencyPeer is one upstream/downstream edge from the service map used for graph-aware RCA.
+type RCADependencyPeer struct {
+	ApplicationID    string `json:"application_id"`
+	Name             string `json:"name"`
+	Direction        string `json:"direction"` // "upstream" | "downstream"
+	AppStatus        string `json:"app_status,omitempty"`
+	ConnectionStatus string `json:"connection_status,omitempty"`
+	ConnectionHint   string `json:"connection_hint,omitempty"`
+}
+
 type RCA struct {
 	Status            string          `json:"status"`
 	Error             string          `json:"error"`
@@ -28,10 +38,11 @@ type RCA struct {
 	PropagationMap    *PropagationMap `json:"propagation_map"`
 	Widgets           []*Widget       `json:"widgets"`
 
-	CausalFindings []*CausalFinding `json:"causal_findings,omitempty"`
-	RankedCauses   []*RankedCause   `json:"ranked_causes,omitempty"`
-	RelatedLogs    []*RCALogEntry   `json:"related_logs,omitempty"`
-	RelatedTraces  []*RCATraceEntry `json:"related_traces,omitempty"`
+	CausalFindings   []*CausalFinding    `json:"causal_findings,omitempty"`
+	RankedCauses     []*RankedCause      `json:"ranked_causes,omitempty"`
+	RelatedLogs      []*RCALogEntry      `json:"related_logs,omitempty"`
+	RelatedTraces    []*RCATraceEntry    `json:"related_traces,omitempty"`
+	DependencyPeers  []RCADependencyPeer `json:"dependency_peers,omitempty"`
 }
 
 type CausalFinding struct {

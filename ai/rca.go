@@ -8,32 +8,38 @@ import (
 	"time"
 
 	"github.com/coroot/coroot/model"
-	"github.com/coroot/coroot/timeseries"
 	"k8s.io/klog"
 )
 
-const rcaSystemPrompt = `You are Coroot's AI-powered Root Cause Analysis engine — an expert SRE that summarizes telemetry data (metrics, logs, traces, deployments) into clear, actionable insights.
+// rcaSystemPrompt is the LLM system message for the two-stage approach:
+// Stage 1 (non-LLM): Coroot's builtin analysis has already identified findings, scored them, and collected evidence.
+// Stage 2 (LLM): The model receives ONLY the structured findings — not raw metrics — and produces a human-readable summary.
+// This mirrors the official product flow: "We avoid relying on LLMs for the actual root cause analysis.
+// Instead, we use them for what they do best: explaining complex issues and summarizing results."
+const rcaSystemPrompt = `You are Coroot's AI explanation engine — an expert SRE that takes pre-analyzed Root Cause Analysis findings and turns them into clear, actionable summaries.
 
-Coroot has already collected monitoring data and detected an anomaly. Your task is to:
-1. Identify the most likely root cause by analyzing metric patterns, events, traces, and deployments.
-2. Trace the issue propagation path across services if multiple services are involved.
-3. Provide a concise summary and actionable remediation steps.
+Coroot has ALREADY performed the root cause analysis using ML algorithms and dependency-graph traversal. The findings below are the output of that analysis. Your job is to:
+1. Summarize the findings into a concise narrative that engineers can act on immediately.
+2. Explain the issue propagation path if multiple services or dependencies are involved.
+3. Suggest specific, actionable remediation steps based on the findings.
+
+You are NOT performing the analysis — it is already done. Focus on EXPLAINING the results clearly.
 
 Your response MUST be a valid JSON object with these fields:
 {
-  "short_summary": "Brief one-line summary of the issue (max 100 chars). Example: 'High latency caused by OOM kills in ad service'",
-  "root_cause": "Concise markdown description of the identified root cause. Focus on the 'why', not the symptoms. Include:\n- The specific component or service at fault\n- The mechanism (e.g., memory pressure, CPU throttling, network issues, bad deployment)\n- Supporting evidence from the data",
-  "immediate_fixes": "Markdown-formatted remediation steps. Be specific and actionable:\n- Configuration changes with exact parameters\n- Rollback instructions if deployment-related\n- Scaling recommendations if resource-related",
-  "detailed_root_cause_analysis": "Detailed markdown analysis including:\n## Anomaly Summary\nWhat was observed (latency spikes, errors, etc.)\n## Issue Propagation\nHow the issue spread across services\n## Timeline\nKey events correlated with the anomaly\n## Evidence\nSpecific metrics, logs, or traces that support the conclusion\n## Root Cause\nDetailed explanation of why this happened"
+  "short_summary": "Brief one-line summary (max 100 chars). Example: 'High latency caused by OOM kills in ad service'",
+  "root_cause": "Concise markdown explanation of the root cause. Focus on the 'why'. Include the specific component at fault, the mechanism, and supporting evidence from the findings.",
+  "immediate_fixes": "Markdown-formatted remediation steps. Be specific:\n- Configuration changes with exact parameters\n- Rollback instructions if deployment-related\n- Scaling recommendations if resource-related",
+  "detailed_root_cause_analysis": "Detailed markdown analysis:\n## Anomaly Summary\n## Issue Propagation\n## Evidence\n## Root Cause\n## Remediation"
 }
 
 Guidelines:
-- Base analysis on concrete evidence from the provided data
+- Base your explanation ONLY on the findings provided — do not speculate beyond them
 - Identify root causes, not just symptoms
-- If a deployment correlates with the anomaly, highlight it prominently
-- If OOM kills, GC pauses, or resource exhaustion are detected, explain the cascade effect
-- Use markdown formatting with headers, lists, and code blocks for clarity
-- If data is insufficient, state what additional data would help
+- If a deployment is mentioned, highlight it prominently
+- If OOM kills, GC pauses, or resource exhaustion appear, explain the cascade effect
+- Use markdown formatting for clarity
+- If findings are insufficient, state what additional investigation would help
 - ONLY output the JSON object, no additional text`
 
 type RCALogPattern struct {
@@ -74,196 +80,185 @@ type RCAData struct {
 	SlowTrace     *model.Trace
 	Deployments   map[model.ApplicationId][]*model.ApplicationDeployment
 
-	LogPatterns     []RCALogPattern
-	LogTimeline     []RCALogSeverityBucket
-	TraceGroups     []RCATraceGroup
-	ErrorSpans      []*model.TraceSpan
-	CorrelatedLogs  []*model.LogEntry
+	// DependencyPeers is filled from model.World when available (API / IncidentRCA).
+	DependencyPeers []model.RCADependencyPeer
+
+	LogPatterns    []RCALogPattern
+	LogTimeline    []RCALogSeverityBucket
+	TraceGroups    []RCATraceGroup
+	ErrorSpans     []*model.TraceSpan
+	CorrelatedLogs []*model.LogEntry
 }
 
+// RunRCA implements the two-stage approach:
+//
+//	Stage 1 – Run builtin detectors (ML/statistical + dependency graph) to produce structured findings.
+//	Stage 2 – Send ONLY the findings to the LLM for human-readable explanation and remediation.
+//
+// If the LLM call fails, the builtin results are returned as a graceful fallback.
 func RunRCA(ctx context.Context, client Client, data RCAData) (*model.RCA, error) {
-	prompt := buildRCAPrompt(data)
-	klog.Infof("RCA: sending prompt to LLM (%d bytes)", len(prompt))
+	builtinRCA := RunBuiltinRCA(data)
+
+	prompt := buildFindingsPrompt(builtinRCA, data)
+	klog.Infof("RCA two-stage: sending findings prompt to LLM (%d bytes, %d findings)",
+		len(prompt), len(builtinRCA.CausalFindings))
+
 	response, err := client.Chat(ctx, rcaSystemPrompt, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("LLM call failed: %w", err)
+		klog.Warningf("RCA: LLM call failed, falling back to builtin results: %v", err)
+		return builtinRCA, nil
 	}
-	klog.Infof("RCA: received LLM response (%d bytes)", len(response))
-	return parseRCAResponse(response)
+	klog.Infof("RCA two-stage: received LLM response (%d bytes)", len(response))
+
+	llmRCA, err := parseRCAResponse(response)
+	if err != nil {
+		klog.Warningf("RCA: failed to parse LLM response, falling back to builtin: %v", err)
+		return builtinRCA, nil
+	}
+
+	return mergeTwoStageResults(builtinRCA, llmRCA), nil
 }
 
-func buildRCAPrompt(data RCAData) string {
+// mergeTwoStageResults combines the LLM's human-readable summaries with the
+// builtin engine's structured data (causal findings, ranked causes, logs, traces).
+func mergeTwoStageResults(builtin, llm *model.RCA) *model.RCA {
+	merged := &model.RCA{
+		Status: "OK",
+
+		ShortSummary:      preferNonEmpty(llm.ShortSummary, builtin.ShortSummary),
+		RootCause:         preferNonEmpty(llm.RootCause, builtin.RootCause),
+		ImmediateFixes:    preferNonEmpty(llm.ImmediateFixes, builtin.ImmediateFixes),
+		DetailedRootCause: preferNonEmpty(llm.DetailedRootCause, builtin.DetailedRootCause),
+
+		PropagationMap:  builtin.PropagationMap,
+		CausalFindings:  builtin.CausalFindings,
+		RankedCauses:    builtin.RankedCauses,
+		RelatedLogs:     builtin.RelatedLogs,
+		RelatedTraces:   builtin.RelatedTraces,
+		DependencyPeers: builtin.DependencyPeers,
+	}
+	return merged
+}
+
+func preferNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// buildFindingsPrompt creates a prompt for Stage 2 (LLM) containing ONLY:
+//   - Application context (ID, time window)
+//   - Dependency graph edges
+//   - Structured causal findings from Stage 1 (builtin analysis)
+//   - Related logs and traces summaries
+//
+// No raw metrics, no raw Kubernetes events, no raw trace spans.
+func buildFindingsPrompt(rca *model.RCA, data RCAData) string {
 	var sb strings.Builder
 	duration := data.To.Sub(data.From)
 
-	sb.WriteString("# Root Cause Analysis Request\n\n")
-	sb.WriteString(fmt.Sprintf("**Application under investigation:** `%s`\n", data.ApplicationID))
+	sb.WriteString("# Root Cause Analysis — Pre-Analyzed Findings\n\n")
+	sb.WriteString(fmt.Sprintf("**Application:** `%s`\n", data.ApplicationID))
 	sb.WriteString(fmt.Sprintf("**Anomaly window:** %s to %s (duration: %s)\n\n",
 		data.From.Format(time.RFC3339), data.To.Format(time.RFC3339), duration.String()))
 
-	sb.WriteString("## Metrics Summary\n\n")
-	if len(data.Metrics) == 0 {
-		sb.WriteString("No metrics data available.\n\n")
-	} else {
-		anomalousMetrics := 0
-		normalMetrics := 0
-		for name, values := range data.Metrics {
-			if anomalousMetrics >= 30 {
-				break
-			}
-			hasAnomaly := false
-			for _, mv := range values {
-				if mv.Values != nil {
-					stats := computeStats(mv.Values)
-					if stats.max > stats.avg*2 && stats.avg > 0 {
-						hasAnomaly = true
-						break
-					}
-				}
-			}
+	sb.WriteString("The findings below were produced by Coroot's ML/statistical analysis engine ")
+	sb.WriteString("(BARO change-point detection, IQR scoring, dependency-graph traversal, and cross-signal correlation). ")
+	sb.WriteString("Your task is to explain them clearly and suggest remediation.\n\n")
 
-			if hasAnomaly {
-				sb.WriteString(fmt.Sprintf("### ⚠ %s (anomalous)\n", name))
-				anomalousMetrics++
-			} else {
-				normalMetrics++
-				if normalMetrics > 20 {
-					continue
-				}
-				sb.WriteString(fmt.Sprintf("### %s\n", name))
+	if len(rca.DependencyPeers) > 0 {
+		sb.WriteString("## Dependency Graph (service map edges)\n\n")
+		for _, p := range rca.DependencyPeers {
+			line := fmt.Sprintf("- **%s** `%s` — app: %s", p.Direction, p.Name, p.AppStatus)
+			if p.ConnectionStatus != "" {
+				line += fmt.Sprintf(", connection: %s", p.ConnectionStatus)
 			}
-			for i, mv := range values {
-				if i >= 5 {
-					sb.WriteString(fmt.Sprintf("  ... and %d more series\n", len(values)-5))
-					break
-				}
-				sb.WriteString(fmt.Sprintf("- Labels: %s\n", formatLabels(mv.Labels)))
-				if mv.Values != nil {
-					stats := computeStats(mv.Values)
-					sb.WriteString(fmt.Sprintf("  Min=%.4f, Max=%.4f, Avg=%.4f, Last=%.4f\n",
-						stats.min, stats.max, stats.avg, stats.last))
-				}
+			if p.ConnectionHint != "" {
+				line += fmt.Sprintf(" (%s)", p.ConnectionHint)
 			}
-			sb.WriteString("\n")
-		}
-		if normalMetrics > 20 {
-			sb.WriteString(fmt.Sprintf("\n... and %d more normal metric groups omitted\n\n", normalMetrics-20))
-		}
-	}
-
-	sb.WriteString("## Kubernetes Events\n\n")
-	if len(data.Events) == 0 {
-		sb.WriteString("No Kubernetes events available.\n\n")
-	} else {
-		warningCount := 0
-		for _, e := range data.Events {
-			if e.Severity > 0 {
-				warningCount++
-			}
-		}
-		if warningCount > 0 {
-			sb.WriteString(fmt.Sprintf("**%d warning/error events detected out of %d total events**\n\n", warningCount, len(data.Events)))
-		}
-		limit := 50
-		if len(data.Events) < limit {
-			limit = len(data.Events)
-		}
-		for i := 0; i < limit; i++ {
-			e := data.Events[i]
-			sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n",
-				e.Timestamp.Format(time.RFC3339),
-				e.Severity.String(),
-				e.Body))
-		}
-		if len(data.Events) > limit {
-			sb.WriteString(fmt.Sprintf("... and %d more events\n", len(data.Events)-limit))
+			sb.WriteString(line + "\n")
 		}
 		sb.WriteString("\n")
 	}
 
-	if data.ErrorTrace != nil && len(data.ErrorTrace.Spans) > 0 {
-		sb.WriteString("## Error Trace (requests that failed)\n\n")
-		writeTrace(&sb, data.ErrorTrace)
-	}
-
-	if data.SlowTrace != nil && len(data.SlowTrace.Spans) > 0 {
-		sb.WriteString("## Slow Trace (requests exceeding SLO latency threshold)\n\n")
-		writeTrace(&sb, data.SlowTrace)
-	}
-
-	sb.WriteString("## Recent Deployments\n\n")
-	if len(data.Deployments) == 0 {
-		sb.WriteString("No recent deployments detected.\n\n")
-	} else {
-		for appID, deploys := range data.Deployments {
-			for _, d := range deploys {
-				startTime := time.Unix(int64(d.StartedAt), 0)
-				sb.WriteString(fmt.Sprintf("- App: `%s`, Deployment: `%s`, Started: %s",
-					appID.String(), d.Name, startTime.Format(time.RFC3339)))
-				if startTime.After(data.From) && startTime.Before(data.To) {
-					sb.WriteString(" ⚠ **WITHIN ANOMALY WINDOW**")
+	if len(rca.CausalFindings) > 0 {
+		sb.WriteString("## Causal Findings (ranked by confidence)\n\n")
+		for i, f := range rca.CausalFindings {
+			sevLabel := "info"
+			if f.Severity == 1 {
+				sevLabel = "warning"
+			} else if f.Severity >= 2 {
+				sevLabel = "critical"
+			}
+			sb.WriteString(fmt.Sprintf("### Finding %d — [%s] %s (confidence: %.0f%%, severity: %s)\n\n",
+				i+1, f.Category, f.Title, f.Confidence, sevLabel))
+			if f.Detail != "" {
+				sb.WriteString(f.Detail + "\n\n")
+			}
+			if f.Evidence != "" {
+				sb.WriteString(fmt.Sprintf("Evidence: `%s`\n\n", f.Evidence))
+			}
+			if len(f.Fixes) > 0 {
+				sb.WriteString("Suggested fixes:\n")
+				for _, fix := range f.Fixes {
+					sb.WriteString(fmt.Sprintf("- %s\n", fix))
 				}
 				sb.WriteString("\n")
 			}
 		}
+	} else {
+		sb.WriteString("## Findings\n\nNo significant anomalies were detected by the analysis engine.\n\n")
+	}
+
+	if len(rca.RankedCauses) > 0 {
+		sb.WriteString("## Ranked Metric Anomalies\n\n")
+		for _, rc := range rca.RankedCauses {
+			sb.WriteString(fmt.Sprintf("- `%s`", rc.Metric))
+			if rc.Service != "" {
+				sb.WriteString(fmt.Sprintf(" (service: `%s`)", rc.Service))
+			}
+			sb.WriteString(fmt.Sprintf(" — confidence: %.0f%%, %s\n", rc.Confidence, rc.Detail))
+		}
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("Analyze the data above. Focus on anomalous metrics, error events, and deployments within the anomaly window. Provide the root cause analysis as a JSON object.\n")
+	if len(rca.RelatedLogs) > 0 {
+		sb.WriteString("## Related Log Entries\n\n")
+		limit := 15
+		if len(rca.RelatedLogs) < limit {
+			limit = len(rca.RelatedLogs)
+		}
+		for i := 0; i < limit; i++ {
+			l := rca.RelatedLogs[i]
+			sb.WriteString(fmt.Sprintf("- [%s] **%s** `%s`: %s\n", l.Timestamp, l.Severity, l.Service, l.Message))
+		}
+		if len(rca.RelatedLogs) > limit {
+			sb.WriteString(fmt.Sprintf("... and %d more entries\n", len(rca.RelatedLogs)-limit))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(rca.RelatedTraces) > 0 {
+		sb.WriteString("## Related Traces\n\n")
+		limit := 10
+		if len(rca.RelatedTraces) < limit {
+			limit = len(rca.RelatedTraces)
+		}
+		for i := 0; i < limit; i++ {
+			t := rca.RelatedTraces[i]
+			sb.WriteString(fmt.Sprintf("- trace `%s` | service: `%s` | duration: %s | status: %s",
+				t.TraceID, t.Service, t.Duration, t.Status))
+			if t.Time != "" {
+				sb.WriteString(fmt.Sprintf(" | time: %s", t.Time))
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Based on the findings above, provide your explanation and remediation as a JSON object.\n")
 	return sb.String()
-}
-
-func writeTrace(sb *strings.Builder, trace *model.Trace) {
-	limit := 20
-	if len(trace.Spans) < limit {
-		limit = len(trace.Spans)
-	}
-	for i := 0; i < limit; i++ {
-		span := trace.Spans[i]
-		sb.WriteString(fmt.Sprintf("- Service: %s, Name: %s, Duration: %s, Status: %s %s\n",
-			span.ServiceName, span.Name, span.Duration,
-			span.StatusCode, span.StatusMessage))
-	}
-	if len(trace.Spans) > limit {
-		sb.WriteString(fmt.Sprintf("... and %d more spans\n", len(trace.Spans)-limit))
-	}
-	sb.WriteString("\n")
-}
-
-type metricStats struct {
-	min, max, avg, last float64
-}
-
-func computeStats(ts *timeseries.TimeSeries) metricStats {
-	var stats metricStats
-	stats.min = 1e18
-	stats.max = -1e18
-	count := 0
-	sum := 0.0
-	iter := ts.Iter()
-	for iter.Next() {
-		_, v := iter.Value()
-		if timeseries.IsNaN(v) {
-			continue
-		}
-		fv := float64(v)
-		if fv < stats.min {
-			stats.min = fv
-		}
-		if fv > stats.max {
-			stats.max = fv
-		}
-		sum += fv
-		count++
-		stats.last = fv
-	}
-	if count > 0 {
-		stats.avg = sum / float64(count)
-	}
-	if stats.min > 1e17 {
-		stats.min = 0
-	}
-	return stats
 }
 
 func formatLabels(labels model.Labels) string {

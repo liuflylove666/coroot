@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -209,7 +210,21 @@ func (api *Api) RCA(w http.ResponseWriter, r *http.Request, u *db.User) {
 			}
 		}()
 	}
+	if world == nil {
+		var werr error
+		world, _, _, werr = api.LoadWorldByRequest(r)
+		if werr != nil {
+			klog.V(4).Infof("RCA: LoadWorldByRequest: %v", werr)
+		}
+	}
 
+	var depPeers []model.RCADependencyPeer
+	if world != nil {
+		if app := world.GetApplication(appId); app != nil {
+			auditor.Audit(world, project, app, nil)
+			depPeers = buildRCADependencyPeers(world, appId)
+		}
+	}
 	if useLocalAI {
 		aiClient, err := ai.NewClient(aiCfg)
 		if err != nil {
@@ -219,15 +234,18 @@ func (api *Api) RCA(w http.ResponseWriter, r *http.Request, u *db.User) {
 			return
 		}
 		rcaData := ai.RCAData{
-			ApplicationID: appId.String(),
-			From:          time.Unix(int64(rcaRequest.Ctx.From), 0),
-			To:            time.Unix(int64(rcaRequest.Ctx.To), 0),
-			Metrics:       rcaRequest.Metrics,
-			Events:        rcaRequest.KubernetesEvents,
-			ErrorTrace:    rcaRequest.ErrorTrace,
-			SlowTrace:     rcaRequest.SlowTrace,
-			Deployments:   rcaRequest.ApplicationDeployments,
+			ApplicationID:   appId.String(),
+			From:            time.Unix(int64(rcaRequest.Ctx.From), 0),
+			To:              time.Unix(int64(rcaRequest.Ctx.To), 0),
+			Metrics:         rcaRequest.Metrics,
+			Events:          rcaRequest.KubernetesEvents,
+			ErrorTrace:      rcaRequest.ErrorTrace,
+			SlowTrace:       rcaRequest.SlowTrace,
+			Deployments:     rcaRequest.ApplicationDeployments,
+			DependencyPeers: depPeers,
 		}
+		enrichRCAFromClickHouse(r.Context(), ch, rcaRequest.Ctx.From, rcaRequest.Ctx.To, rcaRequest.Ctx.Step, appId, &rcaData)
+
 		aiCtx, aiCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer aiCancel()
 		rcaResponse, err := ai.RunRCA(aiCtx, aiClient, rcaData)
@@ -262,14 +280,15 @@ func (api *Api) RCA(w http.ResponseWriter, r *http.Request, u *db.User) {
 
 	klog.Infof("RCA: using built-in analysis for %s (no AI configured)", appId)
 	rcaData := ai.RCAData{
-		ApplicationID: appId.String(),
-		From:          time.Unix(int64(rcaRequest.Ctx.From), 0),
-		To:            time.Unix(int64(rcaRequest.Ctx.To), 0),
-		Metrics:       rcaRequest.Metrics,
-		Events:        rcaRequest.KubernetesEvents,
-		ErrorTrace:    rcaRequest.ErrorTrace,
-		SlowTrace:     rcaRequest.SlowTrace,
-		Deployments:   rcaRequest.ApplicationDeployments,
+		ApplicationID:   appId.String(),
+		From:            time.Unix(int64(rcaRequest.Ctx.From), 0),
+		To:              time.Unix(int64(rcaRequest.Ctx.To), 0),
+		Metrics:         rcaRequest.Metrics,
+		Events:          rcaRequest.KubernetesEvents,
+		ErrorTrace:      rcaRequest.ErrorTrace,
+		SlowTrace:       rcaRequest.SlowTrace,
+		Deployments:     rcaRequest.ApplicationDeployments,
+		DependencyPeers: depPeers,
 	}
 	enrichRCAFromClickHouse(r.Context(), ch, rcaRequest.Ctx.From, rcaRequest.Ctx.To, rcaRequest.Ctx.Step, appId, &rcaData)
 	rca = ai.RunBuiltinRCA(rcaData)
@@ -370,6 +389,9 @@ func (api *Api) IncidentRCA(ctx context.Context, project *db.Project, world *mod
 		}
 	}
 
+	auditor.Audit(world, project, app, nil)
+	depPeers := buildRCADependencyPeers(world, app.Id)
+
 	if useLocalAI {
 		aiClient, clientErr := ai.NewClient(aiCfg)
 		if clientErr != nil {
@@ -379,15 +401,18 @@ func (api *Api) IncidentRCA(ctx context.Context, project *db.Project, world *mod
 			return
 		}
 		rcaData := ai.RCAData{
-			ApplicationID: app.Id.String(),
-			From:          time.Unix(int64(rcaRequest.Ctx.From), 0),
-			To:            time.Unix(int64(rcaRequest.Ctx.To), 0),
-			Metrics:       rcaRequest.Metrics,
-			Events:        rcaRequest.KubernetesEvents,
-			ErrorTrace:    rcaRequest.ErrorTrace,
-			SlowTrace:     rcaRequest.SlowTrace,
-			Deployments:   rcaRequest.ApplicationDeployments,
+			ApplicationID:   app.Id.String(),
+			From:            time.Unix(int64(rcaRequest.Ctx.From), 0),
+			To:              time.Unix(int64(rcaRequest.Ctx.To), 0),
+			Metrics:         rcaRequest.Metrics,
+			Events:          rcaRequest.KubernetesEvents,
+			ErrorTrace:      rcaRequest.ErrorTrace,
+			SlowTrace:       rcaRequest.SlowTrace,
+			Deployments:     rcaRequest.ApplicationDeployments,
+			DependencyPeers: depPeers,
 		}
+		enrichRCAFromClickHouse(ctx, ch, rcaRequest.Ctx.From, rcaRequest.Ctx.To, rcaRequest.Ctx.Step, app.Id, &rcaData)
+
 		aiCtx, aiCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer aiCancel()
 		rcaResponse, rcaErr := ai.RunRCA(aiCtx, aiClient, rcaData)
@@ -419,18 +444,56 @@ func (api *Api) IncidentRCA(ctx context.Context, project *db.Project, world *mod
 
 	klog.Infof("IncidentRCA: using built-in analysis for %s (no AI configured)", app.Id)
 	rcaData := ai.RCAData{
-		ApplicationID: app.Id.String(),
-		From:          time.Unix(int64(rcaRequest.Ctx.From), 0),
-		To:            time.Unix(int64(rcaRequest.Ctx.To), 0),
-		Metrics:       rcaRequest.Metrics,
-		Events:        rcaRequest.KubernetesEvents,
-		ErrorTrace:    rcaRequest.ErrorTrace,
-		SlowTrace:     rcaRequest.SlowTrace,
-		Deployments:   rcaRequest.ApplicationDeployments,
+		ApplicationID:   app.Id.String(),
+		From:            time.Unix(int64(rcaRequest.Ctx.From), 0),
+		To:              time.Unix(int64(rcaRequest.Ctx.To), 0),
+		Metrics:         rcaRequest.Metrics,
+		Events:          rcaRequest.KubernetesEvents,
+		ErrorTrace:      rcaRequest.ErrorTrace,
+		SlowTrace:       rcaRequest.SlowTrace,
+		Deployments:     rcaRequest.ApplicationDeployments,
+		DependencyPeers: depPeers,
 	}
 	enrichRCAFromClickHouse(ctx, ch, rcaRequest.Ctx.From, rcaRequest.Ctx.To, rcaRequest.Ctx.Step, app.Id, &rcaData)
 	rca = ai.RunBuiltinRCA(rcaData)
 	rca.PropagationMap = buildPropagationMap(world, app.Id)
+}
+
+func buildRCADependencyPeers(world *model.World, targetAppId model.ApplicationId) []model.RCADependencyPeer {
+	app := world.GetApplication(targetAppId)
+	if app == nil {
+		return nil
+	}
+	var peers []model.RCADependencyPeer
+	add := func(peer *model.Application, c *model.AppToAppConnection, direction string) {
+		if peer == nil || c == nil {
+			return
+		}
+		connSt, connHint := c.Status()
+		connStr := connSt.String()
+		if connSt == model.UNKNOWN {
+			connStr = ""
+		}
+		name := peer.Id.Name
+		if peer.Id.Namespace != "" && peer.Id.Namespace != "_" {
+			name = fmt.Sprintf("%s/%s", peer.Id.Namespace, peer.Id.Name)
+		}
+		peers = append(peers, model.RCADependencyPeer{
+			ApplicationID:    peer.Id.String(),
+			Name:             name,
+			Direction:        direction,
+			AppStatus:        peer.Status.String(),
+			ConnectionStatus: connStr,
+			ConnectionHint:   connHint,
+		})
+	}
+	for _, c := range app.Upstreams {
+		add(c.RemoteApplication, c, "upstream")
+	}
+	for _, c := range app.Downstreams {
+		add(c.Application, c, "downstream")
+	}
+	return peers
 }
 
 func buildPropagationMap(world *model.World, targetAppId model.ApplicationId) *model.PropagationMap {

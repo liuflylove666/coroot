@@ -45,6 +45,9 @@ type enrichedStats struct {
 func RunBuiltinRCA(data RCAData) *model.RCA {
 	var findings []finding
 
+	// Graph-first: dependency map edges (aligns with product "follow the dependency graph").
+	findings = append(findings, detectDependencyPropagation(data)...)
+
 	findings = append(findings, detectOOMKills(data.Metrics)...)
 	findings = append(findings, detectRestarts(data.Metrics)...)
 	findings = append(findings, detectCPUPressure(data.Metrics)...)
@@ -78,6 +81,7 @@ func RunBuiltinRCA(data RCAData) *model.RCA {
 				"- If you suspect an issue, try widening the time window\n" +
 				"- Verify that monitoring agents are reporting data",
 			DetailedRootCause: buildDetailedReport(data, nil),
+			DependencyPeers:   data.DependencyPeers,
 		}
 	}
 
@@ -91,6 +95,7 @@ func RunBuiltinRCA(data RCAData) *model.RCA {
 	rca.RankedCauses = buildRankedCauses(data.Metrics, findings)
 	rca.RelatedLogs = buildRelatedLogs(data)
 	rca.RelatedTraces = buildRelatedTraces(data)
+	rca.DependencyPeers = data.DependencyPeers
 
 	return rca
 }
@@ -119,6 +124,9 @@ func buildCausalFindings(findings []finding) []*model.CausalFinding {
 			detail = detail[:idx]
 		}
 		if idx := strings.Index(detail, "\n\n> **Causal link:"); idx > 0 {
+			detail = detail[:idx]
+		}
+		if idx := strings.Index(detail, "\n\n> **Graph correlation:"); idx > 0 {
 			detail = detail[:idx]
 		}
 		if len(detail) > 300 {
@@ -162,6 +170,8 @@ func findingFixes(f finding) []string {
 		return []string{"考虑回滚: kubectl rollout undo", "比较新旧版本差异", "检查部署事件"}
 	case f.category == "Latency":
 		return []string{"排查延迟降级端点", "检查资源争用", "审查连接池大小和超时配置"}
+	case f.category == "Dependency":
+		return []string{"在服务地图中检查相关服务的健康与资源", "审查与依赖之间的连通性与网络策略", "在异常时间窗内追踪指向该依赖的调用"}
 	case f.category == "Traces":
 		return []string{"检查瓶颈span的服务", "检查数据库查询性能", "审查下游服务SLI"}
 	default:
@@ -573,6 +583,61 @@ func anomalyScore(s enrichedStats, severity int) float64 {
 }
 
 // --- Detectors ---
+
+// detectDependencyPropagation uses service-map edges from RCADependencyPeers (when World is available).
+// Mirrors the product flow: traverse the dependency graph and surface unhealthy peers before metric-only detectors.
+func detectDependencyPropagation(data RCAData) []finding {
+	if len(data.DependencyPeers) == 0 {
+		return nil
+	}
+	var out []finding
+	for _, p := range data.DependencyPeers {
+		sev := 0
+		if p.ConnectionStatus == "critical" {
+			sev = 2
+		}
+		if p.AppStatus == "critical" && sev < 2 {
+			sev = 2
+		}
+		if p.AppStatus == "warning" && sev < 1 {
+			sev = 1
+		}
+		if sev == 0 {
+			continue
+		}
+		dir := p.Direction
+		if dir == "" {
+			dir = "peer"
+		}
+		name := p.Name
+		if name == "" {
+			name = p.ApplicationID
+		}
+		title := fmt.Sprintf("%s service `%s` — dependency graph issue", dir, name)
+		detail := fmt.Sprintf("**%s** (`%s`) on the dependency graph shows **%s** application status", dir, name, p.AppStatus)
+		if p.ConnectionHint != "" {
+			detail += fmt.Sprintf(" with **%s** on the connection (%s).", p.ConnectionHint, p.ConnectionStatus)
+		} else {
+			detail += "."
+		}
+		detail += "\n\nThis is evaluated **before** metric anomaly detectors so that upstream/downstream issues are candidates for root cause."
+		evidence := fmt.Sprintf("dependency_peer: dir=%s app=%s app_status=%s conn=%s", dir, p.ApplicationID, p.AppStatus, p.ConnectionStatus)
+		score := 35.0 + float64(sev)*22
+		if p.ConnectionStatus == "critical" {
+			score += 15
+		}
+		out = append(out, finding{
+			severity:   sev,
+			category:   "Dependency",
+			title:      title,
+			detail:     detail,
+			evidence:   evidence,
+			changeTime: 0,
+			score:      math.Min(score, 100),
+		})
+	}
+	return out
+}
 
 func detectOOMKills(metrics map[string][]*model.MetricValues) []finding {
 	var results []finding
@@ -1561,6 +1626,24 @@ func correlateFindings(findings []finding, data RCAData) []finding {
 		}
 	}
 
+	// Graph–symptom: unhealthy dependencies often explain HTTP/Latency on this service
+	hasDepIssue := false
+	for _, f := range findings {
+		if f.category == "Dependency" {
+			hasDepIssue = true
+			break
+		}
+	}
+	if hasDepIssue {
+		for i := range findings {
+			if findings[i].category == "HTTP" || findings[i].category == "Latency" {
+				findings[i].detail += "\n\n> **Graph correlation:** The dependency map shows an unhealthy related service — consider whether errors or latency are **cascading** from upstream/downstream rather than local misconfiguration."
+				findings[i].score += 8
+				break
+			}
+		}
+	}
+
 	// Cap scores to 100
 	for i := range findings {
 		if findings[i].score > 100 {
@@ -1656,6 +1739,8 @@ func synthesizeFixes(findings []finding) string {
 			fix = "1. Examine the bottleneck span's service for errors or slow dependencies\n2. Check database query performance (slow queries, lock contention)\n3. Review downstream service SLIs"
 		case f.category == "Latency":
 			fix = "1. Investigate the endpoint experiencing latency degradation\n2. Check for resource contention (CPU throttling, memory pressure)\n3. Review connection pool sizing and timeout configurations"
+		case f.category == "Dependency":
+			fix = "1. Open the **Service map** and inspect the related service's health and resources\n2. Verify connectivity and policies between this service and the dependency\n3. Review traces for calls to that dependency during the incident window"
 		default:
 			fix = "1. Monitor the affected metrics for further changes\n2. Correlate with application logs for context"
 		}
