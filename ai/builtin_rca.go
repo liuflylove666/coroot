@@ -45,7 +45,6 @@ type enrichedStats struct {
 func RunBuiltinRCA(data RCAData) *model.RCA {
 	var findings []finding
 
-	// Infrastructure metrics (from Prometheus cache)
 	findings = append(findings, detectOOMKills(data.Metrics)...)
 	findings = append(findings, detectRestarts(data.Metrics)...)
 	findings = append(findings, detectCPUPressure(data.Metrics)...)
@@ -58,7 +57,6 @@ func RunBuiltinRCA(data RCAData) *model.RCA {
 	findings = append(findings, detectDeploymentCorrelation(data.Deployments, data.From, data.To)...)
 	findings = append(findings, detectStatisticalAnomalies(data.Metrics)...)
 
-	// ClickHouse-powered deep analysis (logs, traces, metrics from CH)
 	findings = append(findings, analyzeLogPatterns(data.LogPatterns, data.From, data.To)...)
 	findings = append(findings, analyzeLogTimeline(data.LogTimeline, data.From, data.To)...)
 	findings = append(findings, analyzeTraceGroups(data.TraceGroups)...)
@@ -88,7 +86,302 @@ func RunBuiltinRCA(data RCAData) *model.RCA {
 	rca.RootCause = synthesizeRootCause(findings)
 	rca.ImmediateFixes = synthesizeFixes(findings)
 	rca.DetailedRootCause = buildDetailedReport(data, findings)
+
+	rca.CausalFindings = buildCausalFindings(findings)
+	rca.RankedCauses = buildRankedCauses(data.Metrics, findings)
+	rca.RelatedLogs = buildRelatedLogs(data)
+	rca.RelatedTraces = buildRelatedTraces(data)
+
 	return rca
+}
+
+func buildCausalFindings(findings []finding) []*model.CausalFinding {
+	var result []*model.CausalFinding
+	if len(findings) == 0 {
+		return nil
+	}
+
+	maxScore := findings[0].score
+	if maxScore <= 0 {
+		maxScore = 1
+	}
+
+	for i, f := range findings {
+		if i >= 6 {
+			break
+		}
+		confidence := math.Min(f.score/maxScore*100, 100)
+
+		services := extractServices(f.title)
+
+		detail := f.detail
+		if idx := strings.Index(detail, "\n\n> **Temporal correlation:"); idx > 0 {
+			detail = detail[:idx]
+		}
+		if idx := strings.Index(detail, "\n\n> **Causal link:"); idx > 0 {
+			detail = detail[:idx]
+		}
+		if len(detail) > 300 {
+			detail = detail[:297] + "..."
+		}
+
+		cf := &model.CausalFinding{
+			Title:      f.title,
+			Category:   f.category,
+			Confidence: math.Round(confidence),
+			Severity:   f.severity,
+			Detail:     detail,
+			Evidence:   f.evidence,
+			Services:   services,
+			Fixes:      findingFixes(f),
+		}
+		result = append(result, cf)
+	}
+	return result
+}
+
+func findingFixes(f finding) []string {
+	switch {
+	case f.category == "Memory" && strings.Contains(f.title, "OOM"):
+		return []string{"扩容容器内存限制", "分析应用堆内存分配", "调整GC参数 (如 -Xmx, GOMEMLIMIT)"}
+	case f.category == "Memory" && strings.Contains(f.title, "leak"):
+		return []string{"捕获 Heap Dump 分析", "检查未关闭连接和无限缓存", "考虑滚动重启作为临时方案"}
+	case f.category == "Memory":
+		return []string{"增大 resources.limits.memory", "启用基于内存的HPA自动扩缩"}
+	case f.category == "CPU" && strings.Contains(f.title, "throttl"):
+		return []string{"增大CPU限制或移除限制", "分析CPU热点路径", "考虑水平扩展"}
+	case f.category == "CPU":
+		return []string{"扩展CPU资源配置", "通过HPA添加副本"}
+	case f.category == "Stability":
+		return []string{"检查容器崩溃日志", "审查资源限制配置", "验证存活/就绪探针配置"}
+	case f.category == "Network":
+		return []string{"检查上游服务健康状态", "审查NetworkPolicy和DNS", "检查连接池饱和度"}
+	case f.category == "HTTP":
+		return []string{"检查应用错误日志", "如与部署关联则考虑回滚", "验证数据库/缓存连接"}
+	case f.category == "Deployment":
+		return []string{"考虑回滚: kubectl rollout undo", "比较新旧版本差异", "检查部署事件"}
+	case f.category == "Latency":
+		return []string{"排查延迟降级端点", "检查资源争用", "审查连接池大小和超时配置"}
+	case f.category == "Traces":
+		return []string{"检查瓶颈span的服务", "检查数据库查询性能", "审查下游服务SLI"}
+	default:
+		return []string{"持续监控相关指标", "关联应用日志分析上下文"}
+	}
+}
+
+func buildRankedCauses(metrics map[string][]*model.MetricValues, findings []finding) []*model.RankedCause {
+	type metricAnomaly struct {
+		name    string
+		service string
+		score   float64
+		detail  string
+		points  []tsPoint
+	}
+	var anomalies []metricAnomaly
+
+	// Collect the primary SLI series (HTTP errors / latency) as the "effect"
+	// for Granger causal analysis
+	var effectSeries []tsPoint
+	for _, name := range []string{"container_http_requests_count", "container_http_requests_latency_total"} {
+		for _, mv := range metrics[name] {
+			if mv.Values == nil {
+				continue
+			}
+			pts := collectPoints(mv.Values)
+			if len(pts) > len(effectSeries) {
+				effectSeries = pts
+			}
+		}
+	}
+
+	for name, values := range metrics {
+		for _, mv := range values {
+			if mv.Values == nil {
+				continue
+			}
+			s := enrichedStatsFrom(mv.Values)
+			if s.count < 5 || s.avg <= 0 {
+				continue
+			}
+
+			score := 0.0
+			if s.iqrScore > 1.5 {
+				score += math.Min((s.iqrScore-1.5)*8, 30)
+			}
+			score += s.changeScore * 30
+			if s.zScoreMax >= 3 {
+				score += math.Min(s.zScoreMax*3, 20)
+			}
+			if s.burstRatio > 3 {
+				score += math.Min((s.burstRatio-3)*2, 10)
+			}
+			if s.trend != 0 && s.avg > 0 {
+				trendPct := math.Abs(s.trend*60) / s.avg * 100
+				if trendPct > 5 {
+					score += math.Min(trendPct, 10)
+				}
+			}
+
+			// Granger causal boost: if this metric's changes precede
+			// the primary SLI degradation, boost its score
+			if len(effectSeries) > 10 && len(s.points) > 10 {
+				causalScore := GrangerCausalScore(s.points, effectSeries, 5)
+				if causalScore > 0.3 {
+					score += causalScore * 20
+				}
+			}
+
+			if score < 15 {
+				continue
+			}
+
+			service := labelVal(mv.Labels, "container_id")
+			if service == "unknown" {
+				service = labelVal(mv.Labels, "destination")
+			}
+
+			anomalies = append(anomalies, metricAnomaly{
+				name:    name,
+				service: service,
+				score:   score,
+				points:  s.points,
+				detail: fmt.Sprintf("IQR-score=%.2f, z-score=%.1f, change=%.0f%%, burst=%.1fx",
+					s.iqrScore, s.zScoreMax, s.changeScore*100, s.burstRatio),
+			})
+		}
+	}
+
+	for _, f := range findings {
+		if f.category == "Deployment" || f.category == "Kubernetes" || f.category == "Logs" {
+			anomalies = append(anomalies, metricAnomaly{
+				name:    f.title,
+				service: "",
+				score:   f.score,
+				detail:  f.evidence,
+			})
+		}
+	}
+
+	sort.Slice(anomalies, func(i, j int) bool {
+		return anomalies[i].score > anomalies[j].score
+	})
+
+	seen := map[string]bool{}
+	var result []*model.RankedCause
+	maxScore := 0.0
+	if len(anomalies) > 0 {
+		maxScore = anomalies[0].score
+	}
+	if maxScore <= 0 {
+		maxScore = 1
+	}
+
+	for _, a := range anomalies {
+		if len(result) >= 8 {
+			break
+		}
+		key := a.name + "|" + a.service
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		confidence := math.Min(a.score/maxScore*100, 100)
+		metric := a.name
+		if len(metric) > 60 {
+			metric = metric[:57] + "..."
+		}
+		result = append(result, &model.RankedCause{
+			Metric:     metric,
+			Service:    a.service,
+			Confidence: math.Round(confidence),
+			Detail:     a.detail,
+		})
+	}
+	return result
+}
+
+func buildRelatedLogs(data RCAData) []*model.RCALogEntry {
+	var result []*model.RCALogEntry
+
+	if len(data.CorrelatedLogs) > 0 {
+		for i, l := range data.CorrelatedLogs {
+			if i >= 20 {
+				break
+			}
+			result = append(result, &model.RCALogEntry{
+				Timestamp: l.Timestamp.Format("15:04:05"),
+				Severity:  l.Severity.String(),
+				Service:   l.ServiceName,
+				Message:   truncate(l.Body, 200),
+			})
+		}
+	}
+
+	for i, p := range data.LogPatterns {
+		if i >= 10 || len(result) >= 30 {
+			break
+		}
+		if p.Severity >= model.SeverityWarning {
+			result = append(result, &model.RCALogEntry{
+				Timestamp: p.LastSeen.Format("15:04:05"),
+				Severity:  p.Severity.String(),
+				Service:   p.ServiceName,
+				Message:   truncate(p.Sample, 200),
+			})
+		}
+	}
+	return result
+}
+
+func buildRelatedTraces(data RCAData) []*model.RCATraceEntry {
+	var result []*model.RCATraceEntry
+
+	if data.ErrorTrace != nil {
+		for i, span := range data.ErrorTrace.Spans {
+			if i >= 10 {
+				break
+			}
+			result = append(result, &model.RCATraceEntry{
+				TraceID:  truncate(span.TraceId, 12),
+				Service:  span.ServiceName,
+				Duration: span.Duration.String(),
+				Time:     span.Timestamp.Format("15:04:05"),
+				Status:   span.StatusCode,
+			})
+		}
+	}
+
+	if data.SlowTrace != nil {
+		for i, span := range data.SlowTrace.Spans {
+			if i >= 10 || len(result) >= 15 {
+				break
+			}
+			result = append(result, &model.RCATraceEntry{
+				TraceID:  truncate(span.TraceId, 12),
+				Service:  span.ServiceName,
+				Duration: span.Duration.String(),
+				Time:     span.Timestamp.Format("15:04:05"),
+				Status:   span.StatusCode,
+			})
+		}
+	}
+
+	for _, g := range data.TraceGroups {
+		if len(result) >= 20 {
+			break
+		}
+		if g.ErrorCount > 0 || g.P99DurationMs > 1000 {
+			result = append(result, &model.RCATraceEntry{
+				TraceID:  truncate(g.SampleTraceId, 12),
+				Service:  g.ServiceName,
+				Duration: fmt.Sprintf("%.0fms", g.P99DurationMs),
+				Time:     "",
+				Status:   g.StatusCode,
+			})
+		}
+	}
+	return result
 }
 
 // --- Statistical helpers ---
@@ -1548,4 +1841,16 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func extractServices(title string) []string {
+	var services []string
+	parts := strings.Split(title, "`")
+	for i := 1; i < len(parts); i += 2 {
+		svc := strings.TrimSpace(parts[i])
+		if svc != "" {
+			services = append(services, svc)
+		}
+	}
+	return services
 }

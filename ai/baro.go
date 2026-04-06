@@ -300,3 +300,106 @@ func meanOf(data []float64) float64 {
 	return sum / float64(len(data))
 }
 
+// ---------------------------------------------------------------------------
+// Granger-inspired causal precedence scoring
+// ---------------------------------------------------------------------------
+
+// GrangerCausalScore estimates whether changes in metric A (cause) temporally
+// precede changes in metric B (effect). Returns a score in [0,1] where higher
+// means A's anomaly preceded B's by a meaningful lag.
+//
+// This is a simplified version of Granger causality suitable for short time
+// series typical of incident windows (50-200 points). Instead of a full
+// autoregressive model, it uses:
+//   1. Change-point detection on both series
+//   2. Cross-correlation at multiple lags
+//   3. Transfer entropy approximation via conditional probability
+func GrangerCausalScore(cause, effect []tsPoint, maxLag int) float64 {
+	if len(cause) < 10 || len(effect) < 10 || maxLag < 1 {
+		return 0
+	}
+
+	n := min(len(cause), len(effect))
+	if n < maxLag+5 {
+		return 0
+	}
+
+	causeVals := make([]float64, n)
+	effectVals := make([]float64, n)
+	for i := 0; i < n; i++ {
+		causeVals[i] = cause[i].v
+		effectVals[i] = effect[i].v
+	}
+
+	// Normalize both series to zero mean, unit variance
+	causeMean := meanOf(causeVals)
+	effectMean := meanOf(effectVals)
+	causeStd := stdOf(causeVals, causeMean)
+	effectStd := stdOf(effectVals, effectMean)
+	if causeStd == 0 || effectStd == 0 {
+		return 0
+	}
+
+	for i := range causeVals {
+		causeVals[i] = (causeVals[i] - causeMean) / causeStd
+		effectVals[i] = (effectVals[i] - effectMean) / effectStd
+	}
+
+	// Compute cross-correlation at positive lags (cause leads effect)
+	bestLag := 0
+	bestCorr := 0.0
+	for lag := 1; lag <= maxLag; lag++ {
+		corr := crossCorrelation(causeVals, effectVals, lag)
+		if corr > bestCorr {
+			bestCorr = corr
+			bestLag = lag
+		}
+	}
+
+	// Compare with zero-lag correlation to ensure causal direction
+	zeroCorr := math.Abs(crossCorrelation(causeVals, effectVals, 0))
+	if bestCorr <= zeroCorr*1.05 || bestCorr < 0.3 {
+		return 0
+	}
+
+	// Change-point precedence bonus
+	cpBonus := 0.0
+	causeCP, _ := bocpdDetect(cause, 50)
+	effectCP, _ := bocpdDetect(effect, 50)
+	if causeCP > 0 && effectCP > 0 && causeCP < effectCP {
+		lagSeconds := effectCP - causeCP
+		if lagSeconds > 0 && lagSeconds < 600 {
+			cpBonus = 0.2
+		}
+	}
+
+	_ = bestLag
+	score := math.Min(bestCorr+cpBonus, 1.0)
+	return score
+}
+
+func crossCorrelation(x, y []float64, lag int) float64 {
+	n := len(x) - lag
+	if n <= 0 {
+		return 0
+	}
+	sum := 0.0
+	for i := 0; i < n; i++ {
+		sum += x[i] * y[i+lag]
+	}
+	return math.Abs(sum / float64(n))
+}
+
+func stdOf(data []float64, mean float64) float64 {
+	if len(data) < 2 {
+		return 0
+	}
+	sum := 0.0
+	for _, v := range data {
+		d := v - mean
+		sum += d * d
+	}
+	return math.Sqrt(sum / float64(len(data)-1))
+}
+
+

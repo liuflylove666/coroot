@@ -27,6 +27,44 @@ type RCA struct {
 	DetailedRootCause string          `json:"detailed_root_cause_analysis"`
 	PropagationMap    *PropagationMap `json:"propagation_map"`
 	Widgets           []*Widget       `json:"widgets"`
+
+	CausalFindings []*CausalFinding `json:"causal_findings,omitempty"`
+	RankedCauses   []*RankedCause   `json:"ranked_causes,omitempty"`
+	RelatedLogs    []*RCALogEntry   `json:"related_logs,omitempty"`
+	RelatedTraces  []*RCATraceEntry `json:"related_traces,omitempty"`
+}
+
+type CausalFinding struct {
+	Title      string   `json:"title"`
+	Category   string   `json:"category"`
+	Confidence float64  `json:"confidence"`
+	Severity   int      `json:"severity"`
+	Detail     string   `json:"detail"`
+	Evidence   string   `json:"evidence"`
+	Services   []string `json:"services,omitempty"`
+	Fixes      []string `json:"fixes,omitempty"`
+}
+
+type RankedCause struct {
+	Metric     string  `json:"metric"`
+	Service    string  `json:"service"`
+	Confidence float64 `json:"confidence"`
+	Detail     string  `json:"detail"`
+}
+
+type RCALogEntry struct {
+	Timestamp string `json:"timestamp"`
+	Severity  string `json:"severity"`
+	Service   string `json:"service"`
+	Message   string `json:"message"`
+}
+
+type RCATraceEntry struct {
+	TraceID  string  `json:"trace_id"`
+	Service  string  `json:"service"`
+	Duration string  `json:"duration"`
+	Time     string  `json:"time"`
+	Status   string  `json:"status"`
 }
 
 type PropagationMap struct {
