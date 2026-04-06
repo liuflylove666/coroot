@@ -11,11 +11,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' 
 
-echo -e "${BLUE}>>> 正在启动 NetBird 仓库同步程序...${NC}"
+echo -e "${BLUE}>>> 正在启动 Coroot 仓库同步程序...${NC}"
 
 # 1. 检查是否在 Git 仓库中
 if [ ! -d .git ]; then
-    echo -e "${RED}[错误] 当前目录不是 Git 仓库！请在 netbird 项目根目录运行。${NC}"
+    echo -e "${RED}[错误] 当前目录不是 Git 仓库！请在 coroot 项目根目录运行。${NC}"
     exit 1
 fi
 
