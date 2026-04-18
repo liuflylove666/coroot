@@ -32,12 +32,18 @@ Coroot's profiling stack consists of several components:
 
 When you use Helm to install Coroot, all these components are automatically installed and seamlessly integrated with each other.
 
+<<<<<<< HEAD
 The eBFP-based approach can only gather CPU profiles.
 To collect other profile types, such as memory or lock contention, user-space profilers need to be integrated.
 Currently, Coroot only supports the built-in Golang profiler.
+=======
+The eBPF-based approach can only gather CPU profiles.
+To collect other profile types, such as memory or lock contention, language-specific profilers are used.
+>>>>>>> upstream/main
 
 ## Golang pull mode
 
+<<<<<<< HEAD
 The Go standard library includes the [pprof](https://pkg.go.dev/net/http/pprof) package,
 enabling developers to expose profiling data of their Go applications.
 
@@ -104,6 +110,13 @@ spec:
         coroot.com/profile-port: "8080"
 ...
 ```
+=======
+* **[Go profiling](/profiling/go-profiling)**: `coroot-node-agent` automatically collects heap profiles from all Go
+  processes by reading runtime memory profiling data directly from process memory. No application changes needed.
+  For additional profile types (CPU, blocking, mutex), `coroot-cluster-agent` can scrape pprof endpoints from annotated pods.
+* **[Java profiling](/profiling/java-profiling)**: `coroot-node-agent` dynamically loads async-profiler into HotSpot JVMs.
+  No application changes needed. Supports CPU, memory allocation, and lock contention profiles.
+>>>>>>> upstream/main
 
 ## Using profiles
 

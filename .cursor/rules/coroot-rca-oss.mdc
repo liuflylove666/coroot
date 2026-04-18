@@ -1,0 +1,41 @@
+---
+description: Coroot OSS — RCA 两阶段架构与依赖图（DependencyPeers）实现要点
+alwaysApply: true
+---
+
+# Coroot OSS：RCA 两阶段架构
+
+## 核心设计（对齐官方产品）
+
+采用两阶段流水线，与 Coroot 官方产品叙事一致：
+- **Stage 1（非 LLM）**：`RunBuiltinRCA(data)` 执行图遍历 + 统计/ML 检测（BARO BOCPD 变点检测、IQR 评分、Granger 因果分析）产出结构化 findings。
+- **Stage 2（LLM）**：`buildFindingsPrompt` 仅将 findings（`CausalFindings`、`DependencyPeers`、`RankedCauses`、`RelatedLogs`、`RelatedTraces`）发给 LLM，LLM 只负责**解释和总结**，不处理原始指标/事件/Span。
+- `mergeTwoStageResults` 合并：LLM 提供人类可读的摘要文本，builtin 提供结构化数据。
+- 如果 LLM 调用失败，优雅回退到 builtin-only 结果。
+
+## 数据流
+
+- `model.RCA` 含 `dependency_peers`（JSON），类型为 `[]RCADependencyPeer`（见 `model/application_incident.go`）。
+- `api/rca.go` 中 `buildRCADependencyPeers(world, appId)` 从 `Application.Upstreams` / `Downstreams` 取边，填 `AppStatus`、`AppToAppConnection.Status()` 等；需先 `auditor.Audit(world, project, app, nil)`。
+- `ai.RunBuiltinRCA` 将 `data.DependencyPeers` 写入返回的 `rca.DependencyPeers`；`detectDependencyPropagation` 优先于其它 detector。
+- `api/rca.go` 两个入口（`RCA` 和 `IncidentRCA`）在 `useLocalAI` 路径中均先调 `enrichRCAFromClickHouse` 填充日志/Trace 数据，再调 `ai.RunRCA`（两阶段）。
+- **已移除** 后端 `mergeMockRCADependencyPeers` 与前端 mock 开关；生产数据仅来自服务地图。
+
+## Prompt 设计
+
+- `rcaSystemPrompt`：告知 LLM 它接收的是已完成的分析结果，不是原始遥测。对齐官方说法："We avoid relying on LLMs for the actual root cause analysis. Instead, we use them for what they do best: explaining complex issues and summarizing results."
+- `buildFindingsPrompt`：不含原始 Metrics、不含原始 K8s Events、不含原始 Trace Spans。仅含 application context + findings + ranked causes + related logs/traces summaries。
+
+## 前端
+
+- `front/src/views/RCA.vue`：有 `dependency_peers` 时展示「依赖图上下文」表格；`findingLink` 中 `category === 'Dependency'` 跳转服务地图 `view: 'map'`。
+- `front/src/api.js`：`getRCA(appId, withSummary, cb)` 三参数，无 mock 查询参数。
+
+## 构建与部署
+
+- 镜像：`deploy/docker-compose.yaml` 中 `context: ..`、`dockerfile: Dockerfile`；前端在 Docker 内 `npm run build-prod`，产物进 `static/` 再 `go build`。
+- 仓库根 `.gitignore` 含 `/static/`，以镜像内构建产物为准。
+
+## 约定
+
+- 改动保持聚焦；避免无关重构；与用户代码风格一致。

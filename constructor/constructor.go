@@ -154,6 +154,7 @@ func (c *Constructor) loadProjectWorld(ctx context.Context, cache Cache, project
 	prof.stage("load_app_to_app_connections", func() { c.loadAppToAppConnections(w, metrics, fqdn2ip, project) })
 	prof.stage("load_application_traffic", func() { c.loadApplicationTraffic(w, metrics, project) })
 	prof.stage("load_jvm", func() { c.loadJVM(metrics, containers) })
+	prof.stage("load_go_runtime", func() { c.loadGoRuntime(metrics, containers) })
 	prof.stage("load_dotnet", func() { c.loadDotNet(metrics, containers) })
 	prof.stage("load_python", func() { c.loadPython(metrics, containers) })
 	prof.stage("load_nodejs", func() { c.loadNodejs(metrics, containers) })
@@ -393,11 +394,11 @@ func enrichInstances(w *model.World, metrics map[string][]*model.MetricValues, r
 
 	instancesByListenAddr := map[string]*model.Instance{}
 	for l, i := range instancesByListen {
-		addr := net.JoinHostPort(l.IP, l.Port)
-		if instancesByListenAddr[addr] != nil {
+		if ip := net.ParseIP(l.IP); ip == nil {
 			continue
 		}
-		if ip := net.ParseIP(l.IP); ip == nil || ip.IsLoopback() {
+		addr := net.JoinHostPort(l.IP, l.Port)
+		if instancesByListenAddr[addr] != nil {
 			continue
 		}
 		l.Proxied = true

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"text/template"
 
@@ -22,10 +23,12 @@ type Webhook struct {
 }
 
 type IncidentTemplateValues struct {
-	Status      string                                 `json:"status"`
-	Application model.ApplicationId                    `json:"application"`
-	Reports     []db.IncidentNotificationDetailsReport `json:"reports"`
-	URL         string                                 `json:"url"`
+	Status          string                                 `json:"status"`
+	Application     model.ApplicationId                    `json:"application"`
+	Reports         []db.IncidentNotificationDetailsReport `json:"reports"`
+	URL             string                                 `json:"url"`
+	RCASummary      string                                 `json:"rca_summary,omitempty"`
+	RCARemediations string                                 `json:"rca_remediations,omitempty"`
 }
 
 type DeploymentTemplateValues struct {
@@ -53,6 +56,53 @@ func NewWebhook(cfg *db.IntegrationWebhook) *Webhook {
 	return &Webhook{cfg: cfg}
 }
 
+func mergeCustomFields(values any, customFields map[string]string) any {
+	if len(customFields) == 0 {
+		return values
+	}
+	v := reflect.ValueOf(values)
+	t := v.Type()
+
+	existingFields := make(map[string]bool)
+	var fields []reflect.StructField
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		fields = append(fields, reflect.StructField{
+			Name: f.Name,
+			Type: f.Type,
+			Tag:  f.Tag,
+		})
+		existingFields[f.Name] = true
+	}
+
+	var customKeys []string
+	for k := range customFields {
+		if k == "" {
+			continue
+		}
+		exported := strings.ToUpper(k[:1]) + k[1:]
+		if existingFields[exported] {
+			continue
+		}
+		customKeys = append(customKeys, k)
+		fields = append(fields, reflect.StructField{
+			Name: exported,
+			Type: reflect.TypeOf(""),
+			Tag:  reflect.StructTag(`json:"` + k + `"`),
+		})
+	}
+
+	newType := reflect.StructOf(fields)
+	newValue := reflect.New(newType).Elem()
+	for i := 0; i < t.NumField(); i++ {
+		newValue.Field(i).Set(v.Field(i))
+	}
+	for i, k := range customKeys {
+		newValue.Field(t.NumField() + i).SetString(customFields[k])
+	}
+	return newValue.Interface()
+}
+
 func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error {
 	tmpl, err := template.New("incidentTemplate").Funcs(templateFunctions).Parse(wh.cfg.IncidentTemplate)
 	if err != nil {
@@ -67,8 +117,10 @@ func (wh *Webhook) SendIncident(ctx context.Context, baseUrl string, n *db.Incid
 	}
 	if n.Details != nil {
 		values.Reports = n.Details.Reports
+		values.RCASummary = n.Details.RCASummary
+		values.RCARemediations = n.Details.RCARemediations
 	}
-	err = tmpl.Execute(&data, values)
+	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
 	if err != nil {
 		return fmt.Errorf("invalid incident template: %s", err)
 	}
@@ -100,7 +152,7 @@ func (wh *Webhook) SendAlert(ctx context.Context, baseUrl string, n *db.AlertNot
 		values.Duration = n.Details.Duration
 		values.ResolvedBy = n.Details.ResolvedBy
 	}
-	err = tmpl.Execute(&data, values)
+	err = tmpl.Execute(&data, mergeCustomFields(values, wh.cfg.CustomFields))
 	if err != nil {
 		return fmt.Errorf("invalid alert template: %s", err)
 	}
@@ -133,13 +185,13 @@ func (wh *Webhook) SendDeployment(ctx context.Context, project *db.Project, ds m
 	}
 
 	var data bytes.Buffer
-	err = tmpl.Execute(&data, DeploymentTemplateValues{
+	err = tmpl.Execute(&data, mergeCustomFields(DeploymentTemplateValues{
 		Application: ds.Deployment.ApplicationId,
 		Status:      status,
 		Version:     ds.Deployment.Version(),
 		Summary:     summary,
 		URL:         deploymentUrl(project.Settings.Integrations.BaseUrl, project.Id, ds.Deployment),
-	})
+	}, wh.cfg.CustomFields))
 	if err != nil {
 		return fmt.Errorf("invalid deployment template: %s", err)
 	}

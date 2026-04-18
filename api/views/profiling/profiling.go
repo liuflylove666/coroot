@@ -192,6 +192,23 @@ func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Cont
 		chart = model.NewChart(ctx, "CPU usage by instance, cores")
 		containerToSeriesF = func(c *model.Container) *timeseries.TimeSeries { return c.CpuUsage }
 	case model.ProfileCategoryMemory:
+<<<<<<< HEAD
+=======
+		switch typ {
+		case model.ProfileTypeJavaHeapAllocObjects:
+			return getJvmChart(app, ctx, instance, "Allocation rate by instance, objects/second",
+				func(jvm *model.Jvm) *timeseries.TimeSeries { return jvm.AllocObjects })
+		case model.ProfileTypeJavaHeapAllocSpace:
+			return getJvmChart(app, ctx, instance, "Allocation rate by instance, bytes/second",
+				func(jvm *model.Jvm) *timeseries.TimeSeries { return jvm.AllocBytes })
+		case model.ProfileTypeGoRuntimeHeapAllocObjects:
+			return getGoRuntimeChart(app, ctx, instance, "Allocation rate by instance, objects/second",
+				func(g *model.GoRuntime) *timeseries.TimeSeries { return g.AllocObjects })
+		case model.ProfileTypeGoRuntimeHeapAllocSpace:
+			return getGoRuntimeChart(app, ctx, instance, "Allocation rate by instance, bytes/second",
+				func(g *model.GoRuntime) *timeseries.TimeSeries { return g.AllocBytes })
+		}
+>>>>>>> upstream/main
 		chart = model.NewChart(ctx, "Memory (RSS) usage by instance, bytes")
 		containerToSeriesF = func(c *model.Container) *timeseries.TimeSeries { return c.MemoryRss }
 	default:
@@ -212,3 +229,49 @@ func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Cont
 	incidents := model.IncidentsToAnnotations(app.Incidents, ctx)
 	return chart.AddAnnotation(events...).AddAnnotation(incidents...), containers
 }
+<<<<<<< HEAD
+=======
+
+func getGoRuntimeChart(app *model.Application, ctx timeseries.Context, instance string, title string, seriesF func(g *model.GoRuntime) *timeseries.TimeSeries) (*model.Chart, map[string][]string) {
+	chart := model.NewChart(ctx, title)
+	containers := map[string][]string{}
+	for _, i := range app.Instances {
+		if i.Go == nil {
+			continue
+		}
+		for _, c := range i.Containers {
+			containers[i.Name] = append(containers[i.Name], c.Id)
+		}
+		if s := seriesF(i.Go); s != nil && (instance == "" || i.Name == instance) {
+			chart.AddSeries(i.Name, s)
+		}
+	}
+	events := model.EventsToAnnotations(app.Events, ctx)
+	incidents := model.IncidentsToAnnotations(app.Incidents, ctx)
+	return chart.AddAnnotation(events...).AddAnnotation(incidents...), containers
+}
+
+func getJvmChart(app *model.Application, ctx timeseries.Context, instance string, title string, seriesF func(jvm *model.Jvm) *timeseries.TimeSeries) (*model.Chart, map[string][]string) {
+	chart := model.NewChart(ctx, title)
+	containers := map[string][]string{}
+	for _, i := range app.Instances {
+		agg := timeseries.NewAggregate(timeseries.NanSum)
+		hasData := false
+		for _, jvm := range i.Jvms {
+			if s := seriesF(jvm); s != nil {
+				agg.Add(s)
+				hasData = true
+			}
+		}
+		for _, c := range i.Containers {
+			containers[i.Name] = append(containers[i.Name], c.Id)
+		}
+		if hasData && (instance == "" || i.Name == instance) {
+			chart.AddSeries(i.Name, agg)
+		}
+	}
+	events := model.EventsToAnnotations(app.Events, ctx)
+	incidents := model.IncidentsToAnnotations(app.Incidents, ctx)
+	return chart.AddAnnotation(events...).AddAnnotation(incidents...), containers
+}
+>>>>>>> upstream/main

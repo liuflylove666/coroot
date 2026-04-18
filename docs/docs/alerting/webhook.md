@@ -17,6 +17,7 @@ To configure a Webhook integration:
 * Paste a Webhook URL to the form
   <img alt="Coroot Webhook integration" src="/img/docs/webhook-integration.png" class="card w-800"/>
 * Configure HTTP basic authentication and headers if required.
+* Add custom fields if you need static key-value pairs included in every notification (see [Custom fields](#custom-fields) below).
 * Define templates for incidents, deployments, and alerts.
 * Send a test alert to check the integration.
 
@@ -38,7 +39,9 @@ type IncidentTemplateValues struct {
         Check   string // Availability, Latency, Memory leak, ...
         Message string // "error budget burn rate is 26x within 1 hour", "app containers have been restarted 11 times by the OOM killer", ...
     }
-    URL string // backlink to the incident page
+    URL             string // backlink to the incident page
+    RCASummary      string // AI-generated short summary of the root cause (empty if RCA is not available)
+    RCARemediations string // AI-generated remediation hints in Markdown (empty if RCA is not available)
 }
 ```
 
@@ -77,6 +80,21 @@ type AlertTemplateValues struct {
     URL         string // backlink to the alert page
 }
 ```
+
+## Custom fields
+
+Custom fields are static key-value pairs that you can configure in the webhook integration settings.
+Once defined, they are merged into the root of every notification's template data (incidents, deployments, and alerts)
+and are accessible both in templates and in `{{ json . }}` output.
+
+For example, if you add a custom field `environment` = `production`, you can reference it in templates as `{{ .Environment }}`.
+When using `{{ json . }}`, it will appear as a top-level key in the resulting JSON.
+
+If a custom field has the same name as a built-in field (e.g. `status`), the built-in field takes precedence.
+
+:::note
+Custom field names are capitalized in templates (e.g., a field named `environment` is accessed as `{{ .Environment }}`), consistent with built-in fields like `{{ .Status }}` and `{{ .Application.Name }}`.
+:::
 
 ## Examples
 
@@ -138,10 +156,12 @@ If the system you aim to integrate accepts JSON-formatted messages, you can empl
 
 This template will encode the incident, deployment, and alert data structures into valid JSON messages with the specified schema.
 
-A sample of resulting incident message:
+A sample of resulting incident message (assuming custom fields `environment` = `production` and `team` = `platform` are configured):
 
 ```json
 {
+  "environment": "production",
+  "team": "platform",
   "status": "WARNING",
   "application": "default:Deployment:app1",
   "reports": [
@@ -156,14 +176,22 @@ A sample of resulting incident message:
       "message": "high network latency to 2 upstream services"
     }
   ],
-  "url": "http://127.0.0.1:8080/p/x0xwl4jz/app/default:Deployment:app1?incident=123ab456"
+  "url": "http://127.0.0.1:8080/p/x0xwl4jz/app/default:Deployment:app1?incident=123ab456",
+  "rca_summary": "Dropped index on postgres-products caused CPU saturation on node2, degrading product-catalog latency",
+  "rca_remediations": "Recreate the dropped trigram index on the products table in postgres-products:\n```sql\nCREATE INDEX idx_products_name_trgm ON public.products USING gin (name gin_trgm_ops);\n```\nIf the pg_trgm extension is not already enabled:\n```sql\nCREATE EXTENSION IF NOT EXISTS pg_trgm;\n```\nThen revert the ArgoCD commit (52ebd518) that removed the index to prevent it from being dropped again on the next sync."
 }
 ```
+
+:::note
+The `rca_summary` and `rca_remediations` fields are only present when AI Root Cause Analysis is available (Coroot Enterprise or Coroot Cloud integration).
+:::
 
 A sample of resulting deployment message:
 
 ```json
 {
+  "environment": "production",
+  "team": "platform",
   "status": "Deployed",
   "application": "default:Deployment:app1",
   "version": "123ab456: app:v1.8.2",
@@ -180,6 +208,8 @@ A sample of resulting alert message:
 
 ```json
 {
+  "environment": "production",
+  "team": "platform",
   "status": "WARNING",
   "project_name": "production",
   "application": "default:Deployment:app1",
