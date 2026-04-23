@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coroot/coroot/ai"
 	"github.com/coroot/coroot/api/forms"
 	"github.com/coroot/coroot/api/views"
 	"github.com/coroot/coroot/auditor"
@@ -229,37 +228,10 @@ func (api *Api) SSO(w http.ResponseWriter, r *http.Request, u *db.User) {
 }
 
 func (api *Api) AI(w http.ResponseWriter, r *http.Request, u *db.User) {
-	switch r.Method {
-	case http.MethodGet:
-		cfg, err := ai.GetConfig(api.db)
-		if err != nil {
-			klog.Errorln("failed to get AI config:", err)
-			http.Error(w, "", http.StatusInternalServerError)
-			return
-		}
-		utils.WriteJson(w, cfg)
-
-	case http.MethodPost:
-		if !api.IsAllowed(u, rbac.Actions.Settings().Edit()) {
-			http.Error(w, "You are not allowed to edit settings.", http.StatusForbidden)
-			return
-		}
-		var cfg ai.Config
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-			klog.Warningln("bad request:", err)
-			http.Error(w, "invalid data", http.StatusBadRequest)
-			return
-		}
-		if err := ai.SaveConfig(api.db, cfg); err != nil {
-			klog.Errorln("failed to save AI config:", err)
-			http.Error(w, "", http.StatusInternalServerError)
-			return
-		}
-		utils.WriteJson(w, cfg)
-
-	default:
-		http.Error(w, "", http.StatusMethodNotAllowed)
-	}
+	res := struct {
+		Provider string `json:"provider"`
+	}{}
+	utils.WriteJson(w, res)
 }
 
 func (api *Api) Project(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -2176,35 +2148,6 @@ func (api *Api) Risks(w http.ResponseWriter, r *http.Request, u *db.User) {
 			http.Error(w, "", http.StatusInternalServerError)
 			return
 		}
-		return
-	}
-}
-
-func (api *Api) AppWeight(w http.ResponseWriter, r *http.Request, u *db.User) {
-	projectId := mux.Vars(r)["project"]
-	appId, err := GetApplicationId(r)
-	if err != nil {
-		klog.Warningln(err)
-		http.Error(w, "invalid application id", http.StatusBadRequest)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "", http.StatusMethodNotAllowed)
-		return
-	}
-	if !api.IsAllowed(u, rbac.Actions.Project(projectId).Inspections().Edit()) {
-		http.Error(w, "You are not allowed to configure application weight.", http.StatusForbidden)
-		return
-	}
-	var form forms.ApplicationSettingsWeightForm
-	if err := forms.ReadAndValidate(r, &form); err != nil {
-		klog.Warningln("bad request:", err)
-		http.Error(w, "invalid data", http.StatusBadRequest)
-		return
-	}
-	if err := api.db.SaveApplicationSetting(db.ProjectId(projectId), appId, &form.ApplicationSettingsWeight); err != nil {
-		klog.Errorln(err)
-		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
 }

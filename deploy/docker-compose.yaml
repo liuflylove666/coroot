@@ -16,8 +16,6 @@ services:
       - '--bootstrap-prometheus-url=http://prometheus:9090'
       - '--bootstrap-refresh-interval=15s'
       - '--bootstrap-clickhouse-address=clickhouse:9000'
-    environment:
-      - LICENSE_KEY=${LICENSE_KEY:-}
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -27,6 +25,7 @@ services:
   node-agent:
     restart: always
     image: ghcr.io/coroot/coroot-node-agent
+    pull_policy: always
     privileged: true
     pid: "host"
     volumes:
@@ -38,12 +37,11 @@ services:
       - '--collector-endpoint=http://coroot:8080'
       - '--cgroupfs-root=/host/sys/fs/cgroup'
       - '--wal-dir=/data'
-    depends_on:
-      - coroot
 
   cluster-agent:
     restart: always
     image: ghcr.io/coroot/coroot-cluster-agent
+    pull_policy: always
     volumes:
       - cluster_agent_data:/data
     command:
@@ -52,29 +50,6 @@ services:
       - '--metrics-wal-dir=/data'
     depends_on:
       - coroot
-
-  coroot-init:
-    image: curlimages/curl:latest
-    depends_on:
-      coroot:
-        condition: service_started
-    restart: "no"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        echo "==> Waiting for Coroot API to be ready ..."
-        for i in $$(seq 1 60); do curl -sf http://coroot:8080/health > /dev/null 2>&1 && break; sleep 2; done
-        echo "==> Setting admin password ..."
-        curl -sf -c /tmp/cookie -X POST http://coroot:8080/api/login \
-          -H 'Content-Type: application/json' \
-          -d '{"email":"admin","password":"admin","action":"set_admin_password"}' || true
-        echo ""
-        echo "============================================"
-        echo "  Coroot is ready!"
-        echo "  Visit: http://localhost:8080"
-        echo "  Login: admin / admin"
-        echo "  RCA:   Built-in analysis (no AI required)"
-        echo "============================================"
 
   prometheus:
     restart: always
@@ -89,7 +64,7 @@ services:
       - '--web.enable-lifecycle'
       - '--web.enable-remote-write-receiver'
     ports:
-      - '127.0.0.1:9099:9090'
+      - '127.0.0.1:9090:9090'
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
       interval: 3s

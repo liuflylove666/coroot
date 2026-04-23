@@ -37,7 +37,6 @@ import TimePicker from '@/components/TimePicker.vue';
 
 export const views = {
     applications: { name: 'Applications', icon: 'mdi-apps' },
-    stability: { name: 'Stability', icon: 'mdi-shield-check-outline' },
     incidents: { name: 'Incidents', icon: 'mdi-alert-outline' },
     alerts: { name: 'Alerts', icon: 'mdi-bell-outline' },
     map: { name: 'Service Map', icon: 'mdi-map-outline' },
@@ -50,6 +49,10 @@ export const views = {
     risks: { name: 'Risks', icon: 'mdi-weather-lightning' },
     dashboards: { name: 'Dashboards', icon: 'mdi-view-dashboard-outline' },
 };
+
+if (window.coroot.edition !== 'Enterprise') {
+    delete views.anomalies;
+}
 
 export default {
     props: {

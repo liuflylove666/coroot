@@ -5,10 +5,6 @@
             <Applications v-else />
         </template>
 
-        <template v-if="view === 'stability'">
-            <Stability />
-        </template>
-
         <template v-if="view === 'incidents'">
             <Incident v-if="$route.query.incident" />
             <Incidents v-else />
@@ -62,7 +58,6 @@
 <script>
 import Applications from '@/views/Applications.vue';
 import Application from '@/views/Application.vue';
-import Stability from '@/views/Stability.vue';
 import Incidents from '@/views/Incidents.vue';
 import Incident from '@/views/Incident.vue';
 import Alerts from '@/views/Alerts.vue';
@@ -84,7 +79,6 @@ export default {
         Kubernetes,
         Applications,
         Application,
-        Stability,
         Incidents,
         Incident,
         Alerts,

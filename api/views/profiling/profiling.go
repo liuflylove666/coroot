@@ -52,7 +52,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 	var category model.ProfileCategory
 	if s := query.Get("query"); s != "" {
 		switch s {
-		case model.ProfileCategoryCPU, model.ProfileCategoryMemory:
+		case model.ProfileCategoryCPU, model.ProfileCategoryMemory, model.ProfileCategoryLock:
 			category = model.ProfileCategory(s)
 		default:
 			if err := json.Unmarshal([]byte(s), &q); err != nil {
@@ -157,7 +157,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 		Services: maps.Keys(services),
 	}
 	if q.Instance != "" {
-		if model.Profiles[q.Type].Ebpf {
+		if model.Profiles[q.Type].NodeAgent {
 			pq.Containers = containers[q.Instance]
 		} else {
 			pq.Namespace = app.Id.Namespace
@@ -184,16 +184,15 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 }
 
 func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Context, instance string) (*model.Chart, map[string][]string) {
+	profile := model.Profiles[typ]
+
 	var chart *model.Chart
 	var containerToSeriesF func(c *model.Container) *timeseries.TimeSeries
-	category := model.Profiles[typ].Category
-	switch category {
+	switch profile.Category {
 	case model.ProfileCategoryCPU:
 		chart = model.NewChart(ctx, "CPU usage by instance, cores")
 		containerToSeriesF = func(c *model.Container) *timeseries.TimeSeries { return c.CpuUsage }
 	case model.ProfileCategoryMemory:
-<<<<<<< HEAD
-=======
 		switch typ {
 		case model.ProfileTypeJavaHeapAllocObjects:
 			return getJvmChart(app, ctx, instance, "Allocation rate by instance, objects/second",
@@ -208,9 +207,17 @@ func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Cont
 			return getGoRuntimeChart(app, ctx, instance, "Allocation rate by instance, bytes/second",
 				func(g *model.GoRuntime) *timeseries.TimeSeries { return g.AllocBytes })
 		}
->>>>>>> upstream/main
 		chart = model.NewChart(ctx, "Memory (RSS) usage by instance, bytes")
 		containerToSeriesF = func(c *model.Container) *timeseries.TimeSeries { return c.MemoryRss }
+	case model.ProfileCategoryLock:
+		switch typ {
+		case model.ProfileTypeJavaLockContentions:
+			return getJvmChart(app, ctx, instance, "Lock contentions by instance, per second",
+				func(jvm *model.Jvm) *timeseries.TimeSeries { return jvm.LockContentions })
+		case model.ProfileTypeJavaLockDelay:
+			return getJvmChart(app, ctx, instance, "Lock wait time by instance, seconds/second",
+				func(jvm *model.Jvm) *timeseries.TimeSeries { return jvm.LockTime })
+		}
 	default:
 		return nil, nil
 	}
@@ -229,8 +236,6 @@ func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Cont
 	incidents := model.IncidentsToAnnotations(app.Incidents, ctx)
 	return chart.AddAnnotation(events...).AddAnnotation(incidents...), containers
 }
-<<<<<<< HEAD
-=======
 
 func getGoRuntimeChart(app *model.Application, ctx timeseries.Context, instance string, title string, seriesF func(g *model.GoRuntime) *timeseries.TimeSeries) (*model.Chart, map[string][]string) {
 	chart := model.NewChart(ctx, title)
@@ -274,4 +279,3 @@ func getJvmChart(app *model.Application, ctx timeseries.Context, instance string
 	incidents := model.IncidentsToAnnotations(app.Incidents, ctx)
 	return chart.AddAnnotation(events...).AddAnnotation(incidents...), containers
 }
->>>>>>> upstream/main

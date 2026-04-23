@@ -36,6 +36,8 @@ const (
 	qRecordingRuleApplicationCategories         = "rr_application_categories"
 	qRecordingRuleApplicationSLO                = "rr_application_slo"
 	qRecordingRuleApplicationExternalEndpoint   = "rr_connection_external_endpoints"
+	qRecordingRuleApplicationDNSRequests        = "rr_application_dns_requests"
+	qRecordingRuleApplicationDNSLatency         = "rr_application_dns_latency"
 )
 
 var applicationAnnotations = maps.Keys(model.ApplicationAnnotationLabels)
@@ -53,6 +55,8 @@ var qConnectionAggregations = []string{
 	qRecordingRuleApplicationL7Latency,
 	qRecordingRuleApplicationTraffic,
 	qRecordingRuleApplicationExternalEndpoint,
+	qRecordingRuleApplicationDNSRequests,
+	qRecordingRuleApplicationDNSLatency,
 }
 
 var (
@@ -67,6 +71,12 @@ type Query struct {
 	Labels *utils.StringSet
 
 	InstanceToInstance bool
+	FillFunc           timeseries.FillFunc
+}
+
+func (q Query) WithFillFunc(f timeseries.FillFunc) Query {
+	q.FillFunc = f
+	return q
 }
 
 func Q(name, query string, labels ...string) Query {
@@ -280,8 +290,8 @@ var QUERIES = []Query{
 	Q("l7_requests_by_dest", "sum by(actual_destination, status) (rate(container_mongo_queries_total[$RANGE]) or rate(container_mysql_queries_total[$RANGE]))", "status"),
 	Q("l7_total_latency_by_dest", "sum by(actual_destination) (rate(container_mongo_queries_duration_seconds_total_sum[$RANGE]) or rate(container_mysql_queries_duration_seconds_total_sum[$RANGE]))"),
 
-	Q("container_dns_requests_total", `sum by(app_id, request_type, domain, status) (rate(container_dns_requests_total{app_id!=""}[$RANGE])) or rate(container_dns_requests_total{app_id=""}[$RANGE])`, "app_id", "request_type", "domain", "status"),
-	Q("container_dns_requests_latency", `sum by(app_id, le) (rate(container_dns_requests_duration_seconds_total_bucket{app_id!=""}[$RANGE])) or rate(container_dns_requests_duration_seconds_total_bucket{app_id=""}[$RANGE]) `, "app_id", "le"),
+	qItoI("container_dns_requests_total", `sum by(app_id, request_type, domain, status) (rate(container_dns_requests_total{app_id!=""}[$RANGE])) or rate(container_dns_requests_total{app_id=""}[$RANGE])`, "request_type", "domain", "status"),
+	qItoI("container_dns_requests_latency", `sum by(app_id, le) (rate(container_dns_requests_duration_seconds_total_bucket{app_id!=""}[$RANGE])) or rate(container_dns_requests_duration_seconds_total_bucket{app_id=""}[$RANGE]) `, "le"),
 
 	Q("aws_discovery_error", `aws_discovery_error`, "error"),
 	qRDS("aws_rds_info", `aws_rds_info`, "cluster_id", "ipv4", "port", "engine", "engine_version", "instance_type", "storage_type", "region", "availability_zone", "multi_az"),
@@ -364,11 +374,16 @@ var QUERIES = []Query{
 	qDB("memcached_commands_total", `rate(memcached_commands_total[$RANGE])`, "command", "status"),
 
 	qJVM("container_jvm_info", `container_jvm_info`, "java_version"),
-	qJVM("container_jvm_heap_size_bytes", `container_jvm_heap_size_bytes`),
 	qJVM("container_jvm_heap_used_bytes", `container_jvm_heap_used_bytes`),
 	qJVM("container_jvm_gc_time_seconds", `rate(container_jvm_gc_time_seconds[$RANGE])`, "gc"),
 	qJVM("container_jvm_safepoint_time_seconds", `rate(container_jvm_safepoint_time_seconds[$RANGE])`),
 	qJVM("container_jvm_safepoint_sync_time_seconds", `rate(container_jvm_safepoint_sync_time_seconds[$RANGE])`),
+	qJVM("container_jvm_heap_max_size_bytes", `container_jvm_heap_max_size_bytes`),
+	qJVM("container_jvm_alloc_bytes_total", `rate(container_jvm_alloc_bytes_total[$RANGE])`).WithFillFunc(timeseries.FillAvg),
+	qJVM("container_jvm_alloc_objects_total", `rate(container_jvm_alloc_objects_total[$RANGE])`).WithFillFunc(timeseries.FillAvg),
+	qJVM("container_jvm_lock_contentions_total", `rate(container_jvm_lock_contentions_total[$RANGE])`).WithFillFunc(timeseries.FillAvg),
+	qJVM("container_jvm_lock_time_seconds_total", `rate(container_jvm_lock_time_seconds_total[$RANGE])`).WithFillFunc(timeseries.FillAvg),
+	qJVM("container_jvm_profiling_status", `container_jvm_profiling_status`),
 
 	Q("container_go_alloc_bytes_total", `rate(container_go_alloc_bytes_total[$RANGE])`).WithFillFunc(timeseries.FillAvg),
 	Q("container_go_alloc_objects_total", `rate(container_go_alloc_objects_total[$RANGE])`).WithFillFunc(timeseries.FillAvg),
@@ -504,7 +519,11 @@ var RecordingRules = map[string]func(db *db.DB, p *db.Project, w *model.World) [
 					}
 					for proto, byStatus := range u.RequestsCount {
 						for status, ts := range byStatus {
-							k := key{dest: dest, status: status, protocol: proto}
+							bucket := "ok"
+							if model.IsRequestStatusFailed(status) {
+								bucket = "failed"
+							}
+							k := key{dest: dest, status: bucket, protocol: proto}
 							agg := byProtoStatus[k]
 							if agg == nil {
 								agg = timeseries.NewAggregate(timeseries.NanSum)
@@ -602,6 +621,38 @@ var RecordingRules = map[string]func(db *db.DB, p *db.Project, w *model.World) [
 			ts := agg.Get()
 			if !ts.IsEmpty() {
 				ls := model.Labels{"app": k.dest.Id.String(), "le": fmt.Sprintf("%f", k.le)}
+				res = append(res, &model.MetricValues{Labels: ls, LabelsHash: promModel.LabelsToSignature(ls), Values: ts})
+			}
+		}
+		return res
+	},
+
+	qRecordingRuleApplicationDNSRequests: func(db *db.DB, p *db.Project, w *model.World) []*model.MetricValues {
+		var res []*model.MetricValues
+		for _, app := range w.Applications {
+			appId := app.Id.String()
+			for r, byStatus := range app.DNSRequests {
+				for status, ts := range byStatus {
+					if ts.IsEmpty() {
+						continue
+					}
+					ls := model.Labels{"app": appId, "request_type": r.Type, "domain": r.Domain, "status": status}
+					res = append(res, &model.MetricValues{Labels: ls, LabelsHash: promModel.LabelsToSignature(ls), Values: ts})
+				}
+			}
+		}
+		return res
+	},
+
+	qRecordingRuleApplicationDNSLatency: func(db *db.DB, p *db.Project, w *model.World) []*model.MetricValues {
+		var res []*model.MetricValues
+		for _, app := range w.Applications {
+			appId := app.Id.String()
+			for le, ts := range app.DNSRequestsHistogram {
+				if ts.IsEmpty() {
+					continue
+				}
+				ls := model.Labels{"app": appId, "le": fmt.Sprintf("%f", le)}
 				res = append(res, &model.MetricValues{Labels: ls, LabelsHash: promModel.LabelsToSignature(ls), Values: ts})
 			}
 		}

@@ -13,12 +13,13 @@ const (
 	ProfileCategoryNone   = ""
 	ProfileCategoryCPU    = "cpu"
 	ProfileCategoryMemory = "memory"
+	ProfileCategoryLock   = "lock"
 )
 
 type ProfileType string
 
 const (
-	ProfileTypeEbpfCPU            ProfileType = "ebpf:cpu:nanoseconds"
+	ProfileTypeNodeAgentCPU       ProfileType = "ebpf:cpu:nanoseconds"
 	ProfileTypeGoCPU              ProfileType = "go:profile_cpu:nanoseconds"
 	ProfileTypeGoHeapAllocObjects ProfileType = "go:heap_alloc_objects:count"
 	ProfileTypeGoHeapAllocSpace   ProfileType = "go:heap_alloc_space:bytes"
@@ -29,8 +30,6 @@ const (
 	ProfileTypeGoBlockDelay       ProfileType = "go:block_delay:nanoseconds"
 	ProfileTypeGoMutexContentions ProfileType = "go:mutex_contentions:count"
 	ProfileTypeGoMutexDelay       ProfileType = "go:mutex_delay:nanoseconds"
-<<<<<<< HEAD
-=======
 
 	ProfileTypeGoRuntimeHeapAllocObjects ProfileType = "go_runtime:heap_alloc_objects:count"
 	ProfileTypeGoRuntimeHeapAllocSpace   ProfileType = "go_runtime:heap_alloc_space:bytes"
@@ -42,7 +41,6 @@ const (
 	ProfileTypeJavaCPU              ProfileType = "java:cpu:nanoseconds"
 	ProfileTypeJavaLockContentions  ProfileType = "java:lock_contentions:count"
 	ProfileTypeJavaLockDelay        ProfileType = "java:lock_delay:nanoseconds"
->>>>>>> upstream/main
 )
 
 type ProfileAggregation string
@@ -57,7 +55,7 @@ type ProfileMeta struct {
 	Name        string
 	Aggregation ProfileAggregation
 	Featured    bool
-	Ebpf        bool
+	NodeAgent   bool
 }
 
 type Profile struct {
@@ -68,11 +66,11 @@ type Profile struct {
 
 var (
 	Profiles = map[ProfileType]ProfileMeta{
-		ProfileTypeEbpfCPU: {
+		ProfileTypeNodeAgentCPU: {
 			Category:    ProfileCategoryCPU,
 			Name:        "CPU (eBPF)",
 			Aggregation: ProfileAggregationSum,
-			Ebpf:        true,
+			NodeAgent:   true,
 		},
 		ProfileTypeGoCPU: {
 			Category:    ProfileCategoryCPU,
@@ -121,8 +119,6 @@ var (
 			Name:        "Golang (mutex_delay)",
 			Aggregation: ProfileAggregationSum,
 		},
-<<<<<<< HEAD
-=======
 		ProfileTypeGoRuntimeHeapAllocObjects: {
 			Category:    ProfileCategoryMemory,
 			Name:        "Go Memory (alloc_objects)",
@@ -181,7 +177,6 @@ var (
 			NodeAgent:   true,
 			Featured:    true,
 		},
->>>>>>> upstream/main
 	}
 )
 

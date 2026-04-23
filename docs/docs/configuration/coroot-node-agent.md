@@ -27,11 +27,8 @@ You can configure coroot-node-agent using command-line flags or environment vari
 | `--disable-l7-tracing` | `DISABLE_L7_TRACING` | `false` | Disable application-layer (L7) tracing |
 | `--disable-gpu-monitoring` | `DISABLE_GPU_MONITORING` | `false` | Disable GPU monitoring (NVML) |
 | `--enable-java-tls` | `ENABLE_JAVA_TLS` | `false` | Enable Java TLS instrumentation via dynamic agent loading |
-<<<<<<< HEAD
-=======
 | `--enable-java-async-profiler` | `ENABLE_JAVA_ASYNC_PROFILER` | `false` | Enable Java profiling via async-profiler (CPU, memory allocations, lock contention) |
 | `--go-heap-profiler` | `GO_HEAP_PROFILER` | `enabled` | Go heap profiling mode: `disabled`, `enabled` (passive), or `force` (enable profiling in all Go apps) |
->>>>>>> upstream/main
 | `--container-allowlist` | `CONTAINER_ALLOWLIST` | – | List of allowed containers (regex patterns) |
 | `--container-denylist` | `CONTAINER_DENYLIST` | – | List of denied containers (regex patterns) |
 | `--skip-systemd-system-services` | `SKIP_SYSTEMD_SYSTEM_SERVICES` | `true` | Skip well-known systemd system services (apt, motd, udev, etc.) |
@@ -55,6 +52,7 @@ You can configure coroot-node-agent using command-line flags or environment vari
 | `--logs-endpoint` | `LOGS_ENDPOINT` | – | Custom URL for logs export |
 | `--profiles-endpoint` | `PROFILES_ENDPOINT` | – | Custom URL for profiles export |
 | `--insecure-skip-verify` | `INSECURE_SKIP_VERIFY` | `false` | Skip TLS certificate verification |
+| `--ca-file` | `CA_FILE` | – | Path to the custom CA certificate file |
 | `--scrape-interval` | `SCRAPE_INTERVAL` | `15s` | How often to collect internal metrics |
 | `--wal-dir` | `WAL_DIR` | `/tmp/coroot-node-agent` | Directory for WAL storage |
 | `--max-spool-size` | `MAX_SPOOL_SIZE` | `500MB` | Max size for on-disk spool |

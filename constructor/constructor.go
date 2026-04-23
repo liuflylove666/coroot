@@ -153,6 +153,7 @@ func (c *Constructor) loadProjectWorld(ctx context.Context, cache Cache, project
 	prof.stage("load_containers", func() { c.loadContainers(w, metrics, pjs, nodes, containers, servicesByClusterIP, ip2fqdn, project) })
 	prof.stage("load_app_to_app_connections", func() { c.loadAppToAppConnections(w, metrics, fqdn2ip, project) })
 	prof.stage("load_application_traffic", func() { c.loadApplicationTraffic(w, metrics, project) })
+	prof.stage("load_application_dns", func() { c.loadApplicationDNS(w, metrics, project) })
 	prof.stage("load_jvm", func() { c.loadJVM(metrics, containers) })
 	prof.stage("load_go_runtime", func() { c.loadGoRuntime(metrics, containers) })
 	prof.stage("load_dotnet", func() { c.loadDotNet(metrics, containers) })
@@ -209,12 +210,12 @@ func (c *Constructor) queryCache(ctx context.Context, cache Cache, project *db.P
 	from = from.Truncate(step)
 	to = to.Truncate(step)
 	queries := map[string]cacheQuery{}
-	addQuery := func(name, statsName, query string, sli bool) {
+	addQuery := func(name, statsName, query string, sli bool, fillFunc timeseries.FillFunc) {
 		if sli && loadRawSLIs {
 			queries[name+"_raw"] = cacheQuery{query: query, from: rawFrom, to: rawTo, step: rawStep, statsName: statsName + "_raw"}
 		}
 		if !sli {
-			queries[name] = cacheQuery{query: query, from: from, to: to, step: step, statsName: statsName}
+			queries[name] = cacheQuery{query: query, from: from, to: to, step: step, statsName: statsName, fillFunc: fillFunc}
 		}
 	}
 
@@ -233,35 +234,25 @@ func (c *Constructor) queryCache(ctx context.Context, cache Cache, project *db.P
 			}
 			continue
 		}
-		addQuery(q.Name, q.Name, q.Query, false)
-		if q.Name == "container_memory_rss" || q.Name == "fargate_container_memory_rss" {
-			name := q.Name + "_for_trend"
-			queries[name] = cacheQuery{
-				query:     q.Query,
-				from:      to.Add(-timeseries.Hour * 4).Truncate(rawStep),
-				to:        to.Truncate(rawStep),
-				step:      rawStep,
-				statsName: name,
-			}
-		}
+		addQuery(q.Name, q.Name, q.Query, false, q.FillFunc)
 	}
 	if !c.options[OptionLoadInstanceToInstanceConnections] {
 		for _, query := range qConnectionAggregations {
 			queries[query] = cacheQuery{query: query, from: from, to: to, step: step, statsName: query}
 		}
-		addQuery(qRecordingRuleApplicationL7Requests, qRecordingRuleApplicationL7Requests, qRecordingRuleApplicationL7Requests, true)
-		addQuery(qRecordingRuleApplicationL7Histogram, qRecordingRuleApplicationL7Histogram, qRecordingRuleApplicationL7Histogram, true)
+		addQuery(qRecordingRuleApplicationL7Requests, qRecordingRuleApplicationL7Requests, qRecordingRuleApplicationL7Requests, true, nil)
+		addQuery(qRecordingRuleApplicationL7Histogram, qRecordingRuleApplicationL7Histogram, qRecordingRuleApplicationL7Histogram, true, nil)
 	}
 	for appId := range checkConfigs {
 		qName := fmt.Sprintf("%s/%s/", qApplicationCustomSLI, appId)
 		availabilityCfg, _ := checkConfigs.GetAvailability(appId)
 		if availabilityCfg.Custom {
-			addQuery(qName+"total_requests", qApplicationCustomSLI, availabilityCfg.Total(), true)
-			addQuery(qName+"failed_requests", qApplicationCustomSLI, availabilityCfg.Failed(), true)
+			addQuery(qName+"total_requests", qApplicationCustomSLI, availabilityCfg.Total(), true, nil)
+			addQuery(qName+"failed_requests", qApplicationCustomSLI, availabilityCfg.Failed(), true, nil)
 		}
 		latencyCfg, _ := checkConfigs.GetLatency(appId, project.CalcApplicationCategory(appId))
 		if latencyCfg.Custom {
-			addQuery(qName+"requests_histogram", qApplicationCustomSLI, latencyCfg.Histogram(), true)
+			addQuery(qName+"requests_histogram", qApplicationCustomSLI, latencyCfg.Histogram(), true, nil)
 		}
 	}
 

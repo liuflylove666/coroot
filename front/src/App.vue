@@ -230,7 +230,7 @@
 
                 <ChangePassword v-if="user" v-model="changePassword" />
 
-                <!-- CloudPromoDialog removed: local AI integration replaces Cloud promo -->
+                <CloudPromoDialog v-if="!ee && user" />
 
                 <Search v-if="search" v-model="search" />
             </v-container>
@@ -245,12 +245,13 @@ import CheckForUpdates from './components/CheckForUpdates.vue';
 import ThemeSelector from './components/ThemeSelector.vue';
 import AgentInstallation from './views/AgentInstallation.vue';
 import ChangePassword from './views/auth/ChangePassword.vue';
+import CloudPromoDialog from './components/CloudPromoDialog.vue';
 import LicenseCheck from './components/LicenseCheck.vue';
 import { views } from '@/views/Views.vue';
 import './app.css';
 
 export default {
-    components: { Welcome, Search, CheckForUpdates, ThemeSelector, AgentInstallation, ChangePassword, LicenseCheck },
+    components: { Welcome, Search, CheckForUpdates, ThemeSelector, AgentInstallation, ChangePassword, CloudPromoDialog, LicenseCheck },
 
     data() {
         let menuCollapsed = this.$storage.local('menu-collapsed');

@@ -3,7 +3,10 @@
         <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text class="mt-2">
             {{ error }}
         </v-alert>
-        
+        <v-alert v-if="disabled" color="info" outlined text>
+            Single Sign-On is available only in Coroot Enterprise (from $1 per CPU core/month).
+            <a href="https://coroot.com/account" target="_blank" class="font-weight-bold">Start</a> your free trial today.
+        </v-alert>
         <v-alert v-if="readonly" color="primary" outlined text>
             Single Sign-On is configured through the config and cannot be modified via the UI.
         </v-alert>
@@ -174,7 +177,7 @@ export default {
 
     data() {
         return {
-            disabled: false,
+            disabled: this.$coroot.edition !== 'Enterprise',
             readonly: false,
             loading: false,
             error: '',

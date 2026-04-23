@@ -375,8 +375,6 @@ Each JVM metric has the `jvm` label which refers to the main class or path to th
 * **Source**: `hsperfdata`
 * **Labels**: `jvm`
 
-<<<<<<< HEAD
-=======
 ### container_jvm_heap_max_size_bytes
 * **Description**: Maximum heap size in bytes (`-Xmx`)
 * **Type**: Gauge
@@ -429,7 +427,6 @@ Each JVM metric has the `jvm` label which refers to the main class or path to th
 * **Type**: Counter
 * **Source**: Go runtime memory profiling data (`runtime.mbuckets`)
 
->>>>>>> upstream/main
 ## Node.js runtime
 
 ### container_nodejs_event_loop_blocked_time_seconds_total

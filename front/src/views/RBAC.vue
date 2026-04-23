@@ -3,7 +3,12 @@
         <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text class="mt-2">
             {{ error }}
         </v-alert>
-        
+        <v-alert v-if="disabled" color="info" outlined text>
+            Coroot Community Edition includes three predefined roles: Admin, Editor, and Viewer.
+            <br />
+            For more granular Role-Based Access Control (RBAC), upgrade to Coroot Enterprise (from $1 per CPU core/month).
+            <a href="https://coroot.com/account" target="_blank" class="font-weight-bold">Start</a> your free trial today.
+        </v-alert>
         <v-simple-table v-if="!error" dense class="table mt-5">
             <thead>
                 <tr>
@@ -111,7 +116,9 @@
                             </v-btn>
                         </tfoot>
                     </v-simple-table>
-                    
+                    <div v-if="disabled" class="mb-2 caption grey--text">
+                        This form is disabled because adjusting role permissions is not supported in the Coroot Community Edition.
+                    </div>
                     <v-alert v-if="form.error" color="red" icon="mdi-alert-octagon-outline" outlined text>{{ form.error }}</v-alert>
                     <v-alert v-if="form.message" color="green" outlined text>{{ form.message }}</v-alert>
                     <div class="d-flex align-center">
@@ -137,7 +144,7 @@ export default {
         return {
             loading: false,
             error: '',
-            disabled: false,
+            disabled: this.$coroot.edition !== 'Enterprise',
             roles: [],
             actions: [],
             scopes: [],
