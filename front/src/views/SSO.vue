@@ -3,9 +3,8 @@
         <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text class="mt-2">
             {{ error }}
         </v-alert>
-        <v-alert v-if="disabled" color="info" outlined text>
-            Single Sign-On is available only in Coroot Enterprise (from $1 per CPU core/month).
-            <a href="https://coroot.com/account" target="_blank" class="font-weight-bold">Start</a> your free trial today.
+        <v-alert v-if="sso_provider === 'saml'" color="info" outlined text>
+            SAML configuration is visible for compatibility, but this local build currently supports OIDC login.
         </v-alert>
         <v-alert v-if="readonly" color="primary" outlined text>
             Single Sign-On is configured through the config and cannot be modified via the UI.
@@ -28,6 +27,7 @@
                         <v-radio-group v-model="sso_provider" :disabled="disabled || readonly" row hide-details dense class="mt-0">
                             <v-radio label="SAML 2.0" value="saml"></v-radio>
                             <v-radio label="OIDC" value="oidc"></v-radio>
+                            <v-radio label="OpenLDAP" value="ldap"></v-radio>
                         </v-radio-group>
                     </td>
                 </tr>
@@ -113,6 +113,59 @@
                     </tr>
                 </template>
 
+                <template v-if="sso_provider === 'ldap'">
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">LDAP URL:</td>
+                        <td><v-text-field v-model="ldap.url" :disabled="disabled || readonly" outlined dense hide-details placeholder="ldap://ldap.example.com:389" class="oidc-input" /></td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">StartTLS:</td>
+                        <td><v-checkbox v-model="ldap.start_tls" :disabled="disabled || readonly" hide-details dense class="mt-0" label="Upgrade ldap:// connection with StartTLS" /></td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">TLS verification:</td>
+                        <td><v-checkbox v-model="ldap.insecure_skip_verify" :disabled="disabled || readonly" hide-details dense class="mt-0" label="Skip certificate verification" /></td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">Bind DN:</td>
+                        <td><v-text-field v-model="ldap.bind_dn" :disabled="disabled || readonly" outlined dense hide-details placeholder="cn=readonly,dc=example,dc=com" class="oidc-input" /></td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">Bind Password:</td>
+                        <td>
+                            <v-text-field
+                                v-model="ldap.bind_password"
+                                :disabled="disabled || readonly"
+                                outlined
+                                dense
+                                hide-details
+                                type="password"
+                                :placeholder="ldap_has_bind_password ? '****************' : ''"
+                                class="oidc-input"
+                            />
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">Base DN:</td>
+                        <td><v-text-field v-model="ldap.base_dn" :disabled="disabled || readonly" outlined dense hide-details placeholder="ou=users,dc=example,dc=com" class="oidc-input" /></td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">User filter:</td>
+                        <td>
+                            <v-text-field v-model="ldap.user_filter" :disabled="disabled || readonly" outlined dense hide-details placeholder="(uid={username})" class="oidc-input" />
+                            <div class="caption grey--text mt-1">Use <code>{username}</code> or <code>{email}</code> as the login placeholder.</div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">Email attribute:</td>
+                        <td><v-text-field v-model="ldap.email_attribute" :disabled="disabled || readonly" outlined dense hide-details placeholder="mail" class="oidc-input" /></td>
+                    </tr>
+                    <tr>
+                        <td class="font-weight-medium text-no-wrap">Name attribute:</td>
+                        <td><v-text-field v-model="ldap.name_attribute" :disabled="disabled || readonly" outlined dense hide-details placeholder="cn" class="oidc-input" /></td>
+                    </tr>
+                </template>
+
                 <tr v-if="enabled">
                     <td class="font-weight-medium text-no-wrap">Force SSO</td>
                     <td>
@@ -170,6 +223,8 @@ export default {
                 return !!this.provider;
             } else if (this.sso_provider === 'oidc') {
                 return !!(this.oidc.issuer_url && this.oidc.client_id && (this.oidc.client_secret || this.oidc_has_secret));
+            } else if (this.sso_provider === 'ldap') {
+                return !!(this.ldap.url && this.ldap.base_dn && this.ldap.user_filter && (this.ldap.bind_password || this.ldap_has_bind_password || !this.ldap.bind_dn));
             }
             return false;
         },
@@ -177,14 +232,14 @@ export default {
 
     data() {
         return {
-            disabled: this.$coroot.edition !== 'Enterprise',
+            disabled: false,
             readonly: false,
             loading: false,
             error: '',
             status: undefined,
             enabled: false,
             force_sso: false,
-            sso_provider: 'saml',
+            sso_provider: 'oidc',
             default_role: '',
             provider: '',
             roles: [],
@@ -194,6 +249,18 @@ export default {
                 client_secret: '',
             },
             oidc_has_secret: false,
+            ldap: {
+                url: '',
+                start_tls: false,
+                insecure_skip_verify: false,
+                bind_dn: '',
+                bind_password: '',
+                base_dn: '',
+                user_filter: '(uid={username})',
+                email_attribute: 'mail',
+                name_attribute: 'cn',
+            },
+            ldap_has_bind_password: false,
         };
     },
 
@@ -232,6 +299,22 @@ export default {
                 } else {
                     this.oidc_has_secret = false;
                 }
+                if (data.ldap) {
+                    this.ldap = {
+                        url: data.ldap.url || '',
+                        start_tls: !!data.ldap.start_tls,
+                        insecure_skip_verify: !!data.ldap.insecure_skip_verify,
+                        bind_dn: data.ldap.bind_dn || '',
+                        bind_password: '',
+                        base_dn: data.ldap.base_dn || '',
+                        user_filter: data.ldap.user_filter || '(uid={username})',
+                        email_attribute: data.ldap.email_attribute || 'mail',
+                        name_attribute: data.ldap.name_attribute || 'cn',
+                    };
+                    this.ldap_has_bind_password = !!data.ldap.bind_dn;
+                } else {
+                    this.ldap_has_bind_password = false;
+                }
             });
         },
         post(action, metadata) {
@@ -254,6 +337,20 @@ export default {
                 };
                 if (this.oidc.client_secret) {
                     form.oidc.client_secret = this.oidc.client_secret;
+                }
+            } else if (this.sso_provider === 'ldap' && action === 'save') {
+                form.ldap = {
+                    url: this.ldap.url,
+                    start_tls: this.ldap.start_tls,
+                    insecure_skip_verify: this.ldap.insecure_skip_verify,
+                    bind_dn: this.ldap.bind_dn,
+                    base_dn: this.ldap.base_dn,
+                    user_filter: this.ldap.user_filter,
+                    email_attribute: this.ldap.email_attribute,
+                    name_attribute: this.ldap.name_attribute,
+                };
+                if (this.ldap.bind_password) {
+                    form.ldap.bind_password = this.ldap.bind_password;
                 }
             }
 

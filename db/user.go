@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/coroot/coroot/rbac"
 	"golang.org/x/crypto/bcrypt"
@@ -152,6 +153,45 @@ func (db *DB) GetUser(id int) (*User, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+func (db *DB) GetUserByEmail(email string) (*User, error) {
+	u := User{Email: email}
+	var roles string
+	err := db.db.QueryRow("SELECT id, name, roles FROM users WHERE lower(email) = lower($1)", email).Scan(&u.Id, &u.Name, &roles)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	err = json.Unmarshal([]byte(roles), &u.Roles)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (db *DB) GetOrCreateSSOUser(email, name string, role rbac.RoleName) (*User, error) {
+	email = strings.TrimSpace(email)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = email
+	}
+	u, err := db.GetUserByEmail(email)
+	if err == nil {
+		return u, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	if err = db.AddUser(email, "", name, role); err != nil {
+		if errors.Is(err, ErrConflict) {
+			return db.GetUserByEmail(email)
+		}
+		return nil, err
+	}
+	return db.GetUserByEmail(email)
 }
 
 func (db *DB) AddUser(email, password, name string, role rbac.RoleName) error {

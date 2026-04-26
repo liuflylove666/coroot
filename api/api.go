@@ -186,26 +186,87 @@ func (api *Api) Users(w http.ResponseWriter, r *http.Request, u *db.User) {
 }
 
 func (api *Api) Roles(w http.ResponseWriter, r *http.Request, u *db.User) {
-	if r.Method == http.MethodPost {
-		http.Error(w, "", http.StatusMethodNotAllowed)
-		return
-	}
-	qaSample := rbac.NewRole("QA",
-		rbac.NewPermission(rbac.ScopeProjectAll, rbac.ActionAll, rbac.Object{"project_id": "staging"}),
-	)
-	dbaSample := rbac.NewRole("DBA",
-		rbac.NewPermission(rbac.ScopeProjectInstrumentations, rbac.ActionEdit, nil),
-		rbac.NewPermission(rbac.ScopeApplication, rbac.ActionView, rbac.Object{"application_category": "databases"}),
-		rbac.NewPermission(rbac.ScopeNode, rbac.ActionView, rbac.Object{"node_name": "db*"}),
-		rbac.NewPermission(rbac.ScopeDashboard, rbac.ActionView, rbac.Object{"dashboard_name": "db*"}),
-	)
 	roles, err := api.roles.GetRoles()
 	if err != nil {
 		klog.Errorln(err)
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
-	utils.WriteJson(w, views.Roles(append(roles, qaSample, dbaSample)))
+	if r.Method == http.MethodPost {
+		if !api.IsAllowed(u, rbac.Actions.Roles().Edit()) {
+			http.Error(w, "You are not allowed to edit roles.", http.StatusForbidden)
+			return
+		}
+		var form forms.RoleForm
+		if err = forms.ReadAndValidate(r, &form); err != nil {
+			klog.Warningln("bad request:", err)
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+		switch form.Action {
+		case forms.RoleFormActionAdd, forms.RoleFormActionEdit:
+			role, err := buildRoleFromForm(form)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			oldName := rbac.RoleName("")
+			if form.Action == forms.RoleFormActionEdit {
+				oldName = form.Id
+				if oldName == "" || oldName.Builtin() {
+					http.Error(w, "Built-in roles can't be changed.", http.StatusBadRequest)
+					return
+				}
+			}
+			if err = api.db.SaveCustomRole(role, oldName); err != nil {
+				klog.Errorln(err)
+				if errors.Is(err, db.ErrConflict) {
+					http.Error(w, "The role already exists.", http.StatusConflict)
+					return
+				}
+				http.Error(w, "", http.StatusInternalServerError)
+				return
+			}
+		case forms.RoleFormActionDelete:
+			if form.Id.Builtin() {
+				http.Error(w, "Built-in roles can't be deleted.", http.StatusBadRequest)
+				return
+			}
+			users, err := api.db.GetUsers()
+			if err != nil {
+				klog.Errorln(err)
+				http.Error(w, "", http.StatusInternalServerError)
+				return
+			}
+			for _, user := range users {
+				if slices.Contains(user.Roles, form.Id) {
+					http.Error(w, fmt.Sprintf("The role is assigned to user %s.", user.Email), http.StatusConflict)
+					return
+				}
+			}
+			if err = api.db.DeleteCustomRole(form.Id); err != nil {
+				klog.Errorln(err)
+				http.Error(w, "", http.StatusInternalServerError)
+				return
+			}
+		}
+		return
+	}
+	utils.WriteJson(w, views.Roles(roles))
+}
+
+func buildRoleFromForm(form forms.RoleForm) (rbac.Role, error) {
+	permissions := make([]rbac.Permission, 0, len(form.Permissions))
+	for _, p := range form.Permissions {
+		var object rbac.Object
+		if strings.TrimSpace(p.Object) != "" && strings.TrimSpace(p.Object) != "*" {
+			if err := json.Unmarshal([]byte(p.Object), &object); err != nil {
+				return rbac.Role{}, fmt.Errorf("invalid object filter for %s:%s", p.Scope, p.Action)
+			}
+		}
+		permissions = append(permissions, rbac.NewPermission(p.Scope, p.Action, object))
+	}
+	return rbac.NewRole(form.Name, permissions...), nil
 }
 
 func (api *Api) SSO(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -215,15 +276,143 @@ func (api *Api) SSO(w http.ResponseWriter, r *http.Request, u *db.User) {
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
+	settings, err := api.getSSOSettings()
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var form forms.SSOForm
+		if err = forms.ReadAndValidate(r, &form); err != nil {
+			klog.Warningln("bad request:", err)
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+		if form.Action == "disable" {
+			settings.Enabled = false
+			if err = api.db.SetSetting(SSOSettingName, settings); err != nil {
+				klog.Errorln(err)
+				http.Error(w, "", http.StatusInternalServerError)
+				return
+			}
+			utils.WriteJson(w, map[string]bool{"enabled": false})
+			return
+		}
+		settings.Provider = form.Provider
+		settings.DefaultRole = form.DefaultRole
+		if settings.DefaultRole == "" {
+			settings.DefaultRole = rbac.RoleViewer
+		}
+		if !settings.DefaultRole.Valid(roles) {
+			http.Error(w, "invalid default role", http.StatusBadRequest)
+			return
+		}
+		settings.ForceSSO = form.ForceSSO
+		switch form.Provider {
+		case "oidc":
+			if form.OIDC == nil {
+				http.Error(w, "OIDC settings are required", http.StatusBadRequest)
+				return
+			}
+			settings.OIDC.IssuerURL = strings.TrimSpace(form.OIDC.IssuerURL)
+			settings.OIDC.ClientID = strings.TrimSpace(form.OIDC.ClientID)
+			if form.OIDC.ClientSecret != "" {
+				settings.OIDC.ClientSecret = form.OIDC.ClientSecret
+			}
+			if settings.OIDC.IssuerURL == "" || settings.OIDC.ClientID == "" || settings.OIDC.ClientSecret == "" {
+				http.Error(w, "issuer URL, client ID, and client secret are required", http.StatusBadRequest)
+				return
+			}
+			settings.Enabled = true
+		case "ldap":
+			if form.LDAP == nil {
+				http.Error(w, "LDAP settings are required", http.StatusBadRequest)
+				return
+			}
+			settings.LDAP.URL = strings.TrimSpace(form.LDAP.URL)
+			settings.LDAP.StartTLS = form.LDAP.StartTLS
+			settings.LDAP.InsecureSkipVerify = form.LDAP.InsecureSkipVerify
+			settings.LDAP.BindDN = strings.TrimSpace(form.LDAP.BindDN)
+			if form.LDAP.BindPassword != "" {
+				settings.LDAP.BindPassword = form.LDAP.BindPassword
+			}
+			settings.LDAP.BaseDN = strings.TrimSpace(form.LDAP.BaseDN)
+			settings.LDAP.UserFilter = strings.TrimSpace(form.LDAP.UserFilter)
+			settings.LDAP.EmailAttribute = strings.TrimSpace(form.LDAP.EmailAttribute)
+			settings.LDAP.NameAttribute = strings.TrimSpace(form.LDAP.NameAttribute)
+			if settings.LDAP.UserFilter == "" {
+				settings.LDAP.UserFilter = "(uid={username})"
+			}
+			if settings.LDAP.EmailAttribute == "" {
+				settings.LDAP.EmailAttribute = "mail"
+			}
+			if settings.LDAP.NameAttribute == "" {
+				settings.LDAP.NameAttribute = "cn"
+			}
+			if settings.LDAP.URL == "" || settings.LDAP.BaseDN == "" || settings.LDAP.UserFilter == "" {
+				http.Error(w, "LDAP URL, base DN, and user filter are required", http.StatusBadRequest)
+				return
+			}
+			settings.Enabled = true
+		case "saml":
+			http.Error(w, "SAML SSO is not implemented in this local build. Please use OIDC.", http.StatusBadRequest)
+			return
+		default:
+			http.Error(w, "unsupported SSO provider", http.StatusBadRequest)
+			return
+		}
+		if err = api.db.SetSetting(SSOSettingName, settings); err != nil {
+			klog.Errorln(err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+	}
 	res := struct {
 		Roles       []rbac.RoleName `json:"roles"`
 		DefaultRole rbac.RoleName   `json:"default_role"`
+		Readonly    bool            `json:"readonly"`
+		Enabled     bool            `json:"enabled"`
+		ForceSSO    bool            `json:"force_sso"`
+		Provider    string          `json:"sso_provider"`
+		SAML        struct {
+			Metadata string `json:"metadata,omitempty"`
+		} `json:"saml,omitempty"`
+		OIDC struct {
+			IssuerURL string `json:"issuer_url,omitempty"`
+			ClientID  string `json:"client_id,omitempty"`
+		} `json:"oidc,omitempty"`
+		LDAP struct {
+			URL                string `json:"url,omitempty"`
+			StartTLS           bool   `json:"start_tls,omitempty"`
+			InsecureSkipVerify bool   `json:"insecure_skip_verify,omitempty"`
+			BindDN             string `json:"bind_dn,omitempty"`
+			BaseDN             string `json:"base_dn,omitempty"`
+			UserFilter         string `json:"user_filter,omitempty"`
+			EmailAttribute     string `json:"email_attribute,omitempty"`
+			NameAttribute      string `json:"name_attribute,omitempty"`
+		} `json:"ldap,omitempty"`
+		ProviderName string `json:"provider,omitempty"`
 	}{
-		DefaultRole: rbac.RoleViewer,
+		DefaultRole:  settings.DefaultRole,
+		Enabled:      settings.Enabled,
+		ForceSSO:     settings.ForceSSO,
+		Provider:     settings.Provider,
+		ProviderName: settings.OIDC.IssuerURL,
 	}
 	for _, role := range roles {
 		res.Roles = append(res.Roles, role.Name)
 	}
+	res.OIDC.IssuerURL = settings.OIDC.IssuerURL
+	res.OIDC.ClientID = settings.OIDC.ClientID
+	res.LDAP.URL = settings.LDAP.URL
+	res.LDAP.StartTLS = settings.LDAP.StartTLS
+	res.LDAP.InsecureSkipVerify = settings.LDAP.InsecureSkipVerify
+	res.LDAP.BindDN = settings.LDAP.BindDN
+	res.LDAP.BaseDN = settings.LDAP.BaseDN
+	res.LDAP.UserFilter = settings.LDAP.UserFilter
+	res.LDAP.EmailAttribute = settings.LDAP.EmailAttribute
+	res.LDAP.NameAttribute = settings.LDAP.NameAttribute
 	utils.WriteJson(w, res)
 }
 

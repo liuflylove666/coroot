@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/coroot/coroot/ai"
@@ -39,21 +41,22 @@ func (api *Api) RCA(w http.ResponseWriter, r *http.Request, u *db.User) {
 
 	defer func() {
 		if incident != nil {
+			applyRCAProblemLifecycle(incident, incident.RCA, rca)
 			if err := api.db.UpdateIncidentRCA(projectId, incident, rca); err != nil {
 				klog.Errorln(err)
 			}
 		} else {
-		resp := rcaResponse{
-			LatencyChart:         sliCharts.latency,
-			ErrorsChart:          sliCharts.errors,
-			AIIntegrationEnabled: true,
-		}
-		if rca != nil && rca.Status == "OK" {
-			resp.Summary = rca
-		} else if rca != nil && rca.Error != "" {
-			resp.Error = rca.Error
-		}
-		utils.WriteJson(w, resp)
+			resp := rcaResponse{
+				LatencyChart:         sliCharts.latency,
+				ErrorsChart:          sliCharts.errors,
+				AIIntegrationEnabled: true,
+			}
+			if rca != nil && rca.Status == "OK" {
+				resp.Summary = rca
+			} else if rca != nil && rca.Error != "" {
+				resp.Error = rca.Error
+			}
+			utils.WriteJson(w, resp)
 		}
 	}()
 
@@ -299,6 +302,7 @@ func (api *Api) RCA(w http.ResponseWriter, r *http.Request, u *db.User) {
 
 func (api *Api) IncidentRCA(ctx context.Context, project *db.Project, world *model.World, incident *model.ApplicationIncident) {
 	rca := incident.RCA
+	previousRCA := incident.RCA
 	if rca != nil && (rca.Status == "OK" || rca.Status == "Failed") {
 		return
 	}
@@ -306,6 +310,7 @@ func (api *Api) IncidentRCA(ctx context.Context, project *db.Project, world *mod
 		rca = &model.RCA{}
 	}
 	defer func() {
+		applyRCAProblemLifecycle(incident, previousRCA, rca)
 		if err := api.db.UpdateIncidentRCA(project.Id, incident, rca); err != nil {
 			klog.Errorln(err)
 		}
@@ -464,8 +469,18 @@ func buildRCADependencyPeers(world *model.World, targetAppId model.ApplicationId
 	if app == nil {
 		return nil
 	}
+	const maxHops = 3
+
+	type queueItem struct {
+		app       *model.Application
+		hop       int
+		pathNames []string
+	}
+
 	var peers []model.RCADependencyPeer
-	add := func(peer *model.Application, c *model.AppToAppConnection, direction string) {
+	seenPeers := map[model.ApplicationId]bool{}
+
+	add := func(peer *model.Application, c *model.AppToAppConnection, direction string, hop int, pathNames []string) {
 		if peer == nil || c == nil {
 			return
 		}
@@ -478,20 +493,75 @@ func buildRCADependencyPeers(world *model.World, targetAppId model.ApplicationId
 		if peer.Id.Namespace != "" && peer.Id.Namespace != "_" {
 			name = fmt.Sprintf("%s/%s", peer.Id.Namespace, peer.Id.Name)
 		}
+		path := append(append([]string{}, pathNames...), name)
 		peers = append(peers, model.RCADependencyPeer{
 			ApplicationID:    peer.Id.String(),
 			Name:             name,
 			Direction:        direction,
+			Hop:              hop,
+			Path:             strings.Join(path, " -> "),
 			AppStatus:        peer.Status.String(),
 			ConnectionStatus: connStr,
 			ConnectionHint:   connHint,
 		})
 	}
-	for _, c := range app.Upstreams {
-		add(c.RemoteApplication, c, "upstream")
+
+	targetName := app.Id.Name
+	if app.Id.Namespace != "" && app.Id.Namespace != "_" {
+		targetName = fmt.Sprintf("%s/%s", app.Id.Namespace, app.Id.Name)
 	}
-	for _, c := range app.Downstreams {
-		add(c.Application, c, "downstream")
+	queue := []queueItem{{app: app, hop: 0, pathNames: []string{targetName}}}
+	seenTraversal := map[model.ApplicationId]bool{app.Id: true}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.hop >= maxHops {
+			continue
+		}
+
+		type edge struct {
+			peer      *model.Application
+			conn      *model.AppToAppConnection
+			direction string
+		}
+		var edges []edge
+		for _, c := range cur.app.Upstreams {
+			edges = append(edges, edge{peer: c.RemoteApplication, conn: c, direction: "upstream"})
+		}
+		for _, c := range cur.app.Downstreams {
+			edges = append(edges, edge{peer: c.Application, conn: c, direction: "downstream"})
+		}
+		sort.Slice(edges, func(i, j int) bool {
+			if edges[i].peer == nil || edges[j].peer == nil {
+				return edges[j].peer == nil
+			}
+			if edges[i].direction != edges[j].direction {
+				return edges[i].direction < edges[j].direction
+			}
+			return edges[i].peer.Id.String() < edges[j].peer.Id.String()
+		})
+
+		for _, e := range edges {
+			if e.peer == nil {
+				continue
+			}
+			nextHop := cur.hop + 1
+			if !seenPeers[e.peer.Id] {
+				add(e.peer, e.conn, e.direction, nextHop, cur.pathNames)
+				seenPeers[e.peer.Id] = true
+			}
+			if seenTraversal[e.peer.Id] || nextHop >= maxHops {
+				continue
+			}
+			name := e.peer.Id.Name
+			if e.peer.Id.Namespace != "" && e.peer.Id.Namespace != "_" {
+				name = fmt.Sprintf("%s/%s", e.peer.Id.Namespace, e.peer.Id.Name)
+			}
+			nextPath := append(append([]string{}, cur.pathNames...), name)
+			seenTraversal[e.peer.Id] = true
+			queue = append(queue, queueItem{app: e.peer, hop: nextHop, pathNames: nextPath})
+		}
 	}
 	return peers
 }
@@ -502,19 +572,20 @@ func buildPropagationMap(world *model.World, targetAppId model.ApplicationId) *m
 	if app == nil {
 		return nil
 	}
+	const maxHops = 3
 
-	seen := map[model.ApplicationId]bool{}
+	byId := map[model.ApplicationId]*model.PropagationMapApplication{}
 
 	addApp := func(a *model.Application, status model.Status) *model.PropagationMapApplication {
-		if seen[a.Id] {
-			return nil
+		if pma := byId[a.Id]; pma != nil {
+			return pma
 		}
-		seen[a.Id] = true
 		pma := &model.PropagationMapApplication{
 			Id:     a.Id,
 			Labels: a.Labels(),
 			Status: status,
 		}
+		byId[a.Id] = pma
 		pm.Applications = append(pm.Applications, pma)
 		return pma
 	}
@@ -524,31 +595,53 @@ func buildPropagationMap(world *model.World, targetAppId model.ApplicationId) *m
 		return nil
 	}
 
-	for _, u := range app.Upstreams {
-		if u.RemoteApplication == nil || seen[u.RemoteApplication.Id] {
-			continue
+	type queueItem struct {
+		app *model.Application
+		hop int
+	}
+	queue := []queueItem{{app: app, hop: 0}}
+	seen := map[model.ApplicationId]bool{app.Id: true}
+
+	addLink := func(from *model.PropagationMapApplication, to *model.Application, direction string) {
+		if from == nil || to == nil {
+			return
 		}
-		upApp := u.RemoteApplication
-		pma := addApp(upApp, upApp.Status)
-		if pma != nil {
-			targetPma.Upstreams = append(targetPma.Upstreams, &model.PropagationMapApplicationLink{
-				Id:     upApp.Id,
-				Status: upApp.Status,
-			})
+		link := &model.PropagationMapApplicationLink{Id: to.Id, Status: to.Status}
+		if direction == "upstream" {
+			from.Upstreams = append(from.Upstreams, link)
+		} else {
+			from.Downstreams = append(from.Downstreams, link)
 		}
 	}
 
-	for _, d := range app.Downstreams {
-		if d.RemoteApplication == nil || seen[d.RemoteApplication.Id] {
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.hop >= maxHops {
 			continue
 		}
-		downApp := d.RemoteApplication
-		pma := addApp(downApp, downApp.Status)
-		if pma != nil {
-			targetPma.Downstreams = append(targetPma.Downstreams, &model.PropagationMapApplicationLink{
-				Id:     downApp.Id,
-				Status: downApp.Status,
-			})
+		curPma := addApp(cur.app, cur.app.Status)
+		for _, u := range cur.app.Upstreams {
+			if u.RemoteApplication == nil {
+				continue
+			}
+			addApp(u.RemoteApplication, u.RemoteApplication.Status)
+			addLink(curPma, u.RemoteApplication, "upstream")
+			if !seen[u.RemoteApplication.Id] {
+				seen[u.RemoteApplication.Id] = true
+				queue = append(queue, queueItem{app: u.RemoteApplication, hop: cur.hop + 1})
+			}
+		}
+		for _, d := range cur.app.Downstreams {
+			if d.Application == nil {
+				continue
+			}
+			addApp(d.Application, d.Application.Status)
+			addLink(curPma, d.Application, "downstream")
+			if !seen[d.Application.Id] {
+				seen[d.Application.Id] = true
+				queue = append(queue, queueItem{app: d.Application, hop: cur.hop + 1})
+			}
 		}
 	}
 
@@ -556,6 +649,78 @@ func buildPropagationMap(world *model.World, targetAppId model.ApplicationId) *m
 		return nil
 	}
 	return pm
+}
+
+func applyRCAProblemLifecycle(incident *model.ApplicationIncident, previous, current *model.RCA) {
+	if incident == nil || current == nil || current.Problem == nil {
+		return
+	}
+
+	now := time.Now().Unix()
+	problem := current.Problem
+	problem.Status = "open"
+	if incident.Resolved() {
+		problem.Status = "resolved"
+	}
+	problem.OpenedAt = int64(incident.OpenedAt)
+	if problem.OpenedAt == 0 {
+		problem.OpenedAt = now
+	}
+	problem.UpdatedAt = now
+	problem.Revision = 1
+	problem.UpdateCount = 1
+
+	if previous == nil || previous.Problem == nil {
+		return
+	}
+
+	prev := previous.Problem
+	if prev.OpenedAt > 0 {
+		problem.OpenedAt = prev.OpenedAt
+	}
+	if prev.Revision > 0 {
+		problem.Revision = prev.Revision + 1
+	}
+	if prev.UpdateCount > 0 {
+		problem.UpdateCount = prev.UpdateCount + 1
+	}
+	preserveRCAEventLifecycle(previous.Events, current.Events)
+}
+
+func preserveRCAEventLifecycle(previous, current []*model.RCAEvent) {
+	if len(previous) == 0 || len(current) == 0 {
+		return
+	}
+	prevByFingerprint := map[string]*model.RCAEvent{}
+	for _, e := range previous {
+		if e != nil && e.Fingerprint != "" {
+			prevByFingerprint[e.Fingerprint] = e
+		}
+	}
+	for _, e := range current {
+		if e == nil || e.Fingerprint == "" {
+			continue
+		}
+		prev := prevByFingerprint[e.Fingerprint]
+		if prev == nil {
+			continue
+		}
+		if prev.FirstSeen > 0 && (e.FirstSeen == 0 || prev.FirstSeen < e.FirstSeen) {
+			e.FirstSeen = prev.FirstSeen
+		}
+		if prev.Count > e.Count {
+			e.Count = prev.Count + 1
+		}
+		if e.CausalParent == "" {
+			e.CausalParent = prev.CausalParent
+		}
+		if e.PropagationPath == "" {
+			e.PropagationPath = prev.PropagationPath
+		}
+		if e.Role == "" {
+			e.Role = prev.Role
+		}
+	}
 }
 
 func enrichRCAFromClickHouse(ctx context.Context, ch *clickhouse.Client, from, to timeseries.Time, step timeseries.Duration, appId model.ApplicationId, data *ai.RCAData) {

@@ -20,7 +20,6 @@ import (
 	"github.com/coroot/coroot/config"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/grpc"
-	"github.com/coroot/coroot/rbac"
 	"github.com/coroot/coroot/stats"
 	"github.com/coroot/coroot/utils"
 	"github.com/coroot/coroot/watchers"
@@ -134,7 +133,7 @@ func main() {
 		klog.Exitln(err)
 	}
 
-	a := api.NewApi(promCache, database, coll, pricing, rbac.NewStaticRoleManager(), nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, nil)
+	a := api.NewApi(promCache, database, coll, pricing, database, nil, globalClickhouse, globalPrometheus, deploymentUuid, instanceUuid, nil)
 	err = a.AuthInit(cfg.Auth.AnonymousRole, cfg.Auth.BootstrapAdminPassword)
 	if err != nil {
 		klog.Exitln(err)
@@ -169,6 +168,9 @@ func main() {
 	r.UseEncodedPath()
 	r.HandleFunc("/api/login", a.Login).Methods(http.MethodPost)
 	r.HandleFunc("/api/logout", a.Logout).Methods(http.MethodPost)
+	r.HandleFunc("/api/sso-status", a.SSOStatus).Methods(http.MethodGet)
+	r.HandleFunc("/api/sso-login", a.SSOLogin).Methods(http.MethodGet)
+	r.HandleFunc("/sso/oidc", a.SSOOIDCCallback).Methods(http.MethodGet)
 
 	r.HandleFunc("/api/user", a.Auth(a.User)).Methods(http.MethodGet, http.MethodPost)
 	r.HandleFunc("/api/users", a.Auth(a.Users)).Methods(http.MethodGet, http.MethodPost)

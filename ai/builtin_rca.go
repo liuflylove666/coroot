@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coroot/coroot/model"
@@ -43,29 +44,7 @@ type enrichedStats struct {
 // --- Public entry point ---
 
 func RunBuiltinRCA(data RCAData) *model.RCA {
-	var findings []finding
-
-	// Graph-first: dependency map edges (aligns with product "follow the dependency graph").
-	findings = append(findings, detectDependencyPropagation(data)...)
-
-	findings = append(findings, detectOOMKills(data.Metrics)...)
-	findings = append(findings, detectRestarts(data.Metrics)...)
-	findings = append(findings, detectCPUPressure(data.Metrics)...)
-	findings = append(findings, detectMemoryPressure(data.Metrics)...)
-	findings = append(findings, detectNetworkIssues(data.Metrics)...)
-	findings = append(findings, detectHTTPErrors(data.Metrics)...)
-	findings = append(findings, detectLatencyDegradation(data.Metrics)...)
-	findings = append(findings, detectKubernetesEvents(data.Events)...)
-	findings = append(findings, detectTraceAnomalies(data.ErrorTrace, data.SlowTrace)...)
-	findings = append(findings, detectDeploymentCorrelation(data.Deployments, data.From, data.To)...)
-	findings = append(findings, detectStatisticalAnomalies(data.Metrics)...)
-
-	findings = append(findings, analyzeLogPatterns(data.LogPatterns, data.From, data.To)...)
-	findings = append(findings, analyzeLogTimeline(data.LogTimeline, data.From, data.To)...)
-	findings = append(findings, analyzeTraceGroups(data.TraceGroups)...)
-	findings = append(findings, analyzeErrorSpans(data.ErrorSpans)...)
-	findings = append(findings, analyzeCorrelatedLogs(data.CorrelatedLogs)...)
-
+	findings := runFindingDetectors(data)
 	findings = correlateFindings(findings, data)
 
 	sort.Slice(findings, func(i, j int) bool {
@@ -96,8 +75,57 @@ func RunBuiltinRCA(data RCAData) *model.RCA {
 	rca.RelatedLogs = buildRelatedLogs(data)
 	rca.RelatedTraces = buildRelatedTraces(data)
 	rca.DependencyPeers = data.DependencyPeers
+	rca.Events = buildRCAEvents(findings, data)
+	rca.Problem = buildRCAProblem(rca.Events, data)
 
 	return rca
+}
+
+func runFindingDetectors(data RCAData) []finding {
+	type detector struct {
+		name string
+		run  func() []finding
+	}
+
+	detectors := []detector{
+		// Graph-first: dependency map edges (aligns with product "follow the dependency graph").
+		{name: "dependency", run: func() []finding { return detectDependencyPropagation(data) }},
+		{name: "oom", run: func() []finding { return detectOOMKills(data.Metrics) }},
+		{name: "restarts", run: func() []finding { return detectRestarts(data.Metrics) }},
+		{name: "cpu", run: func() []finding { return detectCPUPressure(data.Metrics) }},
+		{name: "memory", run: func() []finding { return detectMemoryPressure(data.Metrics) }},
+		{name: "network", run: func() []finding { return detectNetworkIssues(data.Metrics) }},
+		{name: "http", run: func() []finding { return detectHTTPErrors(data.Metrics) }},
+		{name: "latency", run: func() []finding { return detectLatencyDegradation(data.Metrics) }},
+		{name: "multivariate", run: func() []finding { return detectMultivariateAnomalies(data.Metrics) }},
+		{name: "kubernetes", run: func() []finding { return detectKubernetesEvents(data.Events) }},
+		{name: "traces", run: func() []finding { return detectTraceAnomalies(data.ErrorTrace, data.SlowTrace) }},
+		{name: "deployments", run: func() []finding { return detectDeploymentCorrelation(data.Deployments, data.From, data.To) }},
+		{name: "statistical", run: func() []finding { return detectStatisticalAnomalies(data.Metrics) }},
+		{name: "log_patterns", run: func() []finding { return analyzeLogPatterns(data.LogPatterns, data.From, data.To) }},
+		{name: "log_timeline", run: func() []finding { return analyzeLogTimeline(data.LogTimeline, data.From, data.To) }},
+		{name: "trace_groups", run: func() []finding { return analyzeTraceGroups(data.TraceGroups) }},
+		{name: "error_spans", run: func() []finding { return analyzeErrorSpans(data.ErrorSpans) }},
+		{name: "correlated_logs", run: func() []finding { return analyzeCorrelatedLogs(data.CorrelatedLogs) }},
+	}
+
+	results := make([][]finding, len(detectors))
+	var wg sync.WaitGroup
+	wg.Add(len(detectors))
+	for i, d := range detectors {
+		go func(i int, d detector) {
+			defer wg.Done()
+			_ = d.name
+			results[i] = d.run()
+		}(i, d)
+	}
+	wg.Wait()
+
+	var findings []finding
+	for _, r := range results {
+		findings = append(findings, r...)
+	}
+	return findings
 }
 
 func buildCausalFindings(findings []finding) []*model.CausalFinding {
@@ -146,6 +174,613 @@ func buildCausalFindings(findings []finding) []*model.CausalFinding {
 		result = append(result, cf)
 	}
 	return result
+}
+
+func buildRCAEvents(findings []finding, data RCAData) []*model.RCAEvent {
+	if len(findings) == 0 {
+		return nil
+	}
+
+	maxScore := findings[0].score
+	if maxScore <= 0 {
+		maxScore = 1
+	}
+
+	var events []*model.RCAEvent
+	for _, f := range findings {
+		entity := findingEntity(f, data)
+		if entity == "" {
+			entity = data.ApplicationID
+		}
+		firstSeen, lastSeen := findingTimeWindow(f, data)
+		event := &model.RCAEvent{
+			Fingerprint: eventFingerprint(f.category, entity, f.title),
+			Source:      eventSource(f.category),
+			Entity:      entity,
+			Category:    f.category,
+			Title:       f.title,
+			Severity:    f.severity,
+			Confidence:  math.Round(math.Min(f.score/maxScore*100, 100)),
+			FirstSeen:   firstSeen,
+			LastSeen:    lastSeen,
+			Count:       1,
+			Evidence:    evidenceList(f.evidence),
+		}
+		events = append(events, event)
+	}
+	events = mergeRCAEvents(events)
+	events = applyTopologyCausalMerge(events, data)
+	events = applyRootCauseScoring(events, data)
+	return events
+}
+
+func findingEntity(f finding, data RCAData) string {
+	services := extractServices(f.title)
+	if len(services) > 0 {
+		return services[0]
+	}
+	switch f.category {
+	case "Dependency":
+		if idx := strings.Index(f.evidence, "app="); idx >= 0 {
+			part := f.evidence[idx+len("app="):]
+			if end := strings.Index(part, " "); end >= 0 {
+				part = part[:end]
+			}
+			if part != "" {
+				return part
+			}
+		}
+	case "Deployment":
+		for appID := range data.Deployments {
+			return appID.String()
+		}
+	}
+	return data.ApplicationID
+}
+
+func findingTimeWindow(f finding, data RCAData) (int64, int64) {
+	if f.changeTime > 0 {
+		return f.changeTime, f.changeTime
+	}
+	from := data.From.Unix()
+	to := data.To.Unix()
+	if from <= 0 || to <= 0 {
+		return 0, 0
+	}
+	return from, to
+}
+
+func eventFingerprint(category, entity, title string) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(category)),
+		strings.ToLower(strings.TrimSpace(entity)),
+		semanticEventTitle(title),
+	}, "|")
+}
+
+func semanticEventTitle(title string) string {
+	title = strings.ToLower(title)
+	var b strings.Builder
+	lastSpace := false
+	for _, r := range title {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+			lastSpace = false
+		case r >= '0' && r <= '9':
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+		default:
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+		}
+	}
+	parts := strings.Fields(b.String())
+	if len(parts) > 8 {
+		parts = parts[:8]
+	}
+	return strings.Join(parts, " ")
+}
+
+func eventSource(category string) string {
+	switch category {
+	case "Dependency":
+		return "topology"
+	case "Logs":
+		return "logs"
+	case "Traces":
+		return "traces"
+	case "Kubernetes":
+		return "events"
+	case "Deployment":
+		return "changes"
+	default:
+		return "metrics"
+	}
+}
+
+func evidenceList(evidence string) []string {
+	if evidence == "" {
+		return nil
+	}
+	return []string{evidence}
+}
+
+func mergeRCAEvents(events []*model.RCAEvent) []*model.RCAEvent {
+	if len(events) <= 1 {
+		return events
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].Fingerprint != events[j].Fingerprint {
+			return events[i].Fingerprint < events[j].Fingerprint
+		}
+		return events[i].FirstSeen < events[j].FirstSeen
+	})
+
+	const mergeWindowSeconds = 120
+	var merged []*model.RCAEvent
+	for _, e := range events {
+		var target *model.RCAEvent
+		for i := len(merged) - 1; i >= 0; i-- {
+			candidate := merged[i]
+			if candidate.Fingerprint != e.Fingerprint {
+				continue
+			}
+			if eventWindowsClose(candidate, e, mergeWindowSeconds) {
+				target = candidate
+			}
+			break
+		}
+		if target == nil {
+			clone := *e
+			clone.Evidence = append([]string{}, e.Evidence...)
+			merged = append(merged, &clone)
+			continue
+		}
+		mergeRCAEvent(target, e)
+	}
+
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].Confidence != merged[j].Confidence {
+			return merged[i].Confidence > merged[j].Confidence
+		}
+		if merged[i].Severity != merged[j].Severity {
+			return merged[i].Severity > merged[j].Severity
+		}
+		return merged[i].FirstSeen < merged[j].FirstSeen
+	})
+	return merged
+}
+
+func eventWindowsClose(a, b *model.RCAEvent, window int64) bool {
+	if a.FirstSeen == 0 || b.FirstSeen == 0 {
+		return true
+	}
+	if a.LastSeen == 0 {
+		a.LastSeen = a.FirstSeen
+	}
+	if b.LastSeen == 0 {
+		b.LastSeen = b.FirstSeen
+	}
+	return b.FirstSeen <= a.LastSeen+window && a.FirstSeen <= b.LastSeen+window
+}
+
+func mergeRCAEvent(dst, src *model.RCAEvent) {
+	if dst.FirstSeen == 0 || (src.FirstSeen > 0 && src.FirstSeen < dst.FirstSeen) {
+		dst.FirstSeen = src.FirstSeen
+	}
+	if src.LastSeen > dst.LastSeen {
+		dst.LastSeen = src.LastSeen
+	}
+	if src.Severity > dst.Severity {
+		dst.Severity = src.Severity
+	}
+	if src.Confidence > dst.Confidence {
+		dst.Confidence = src.Confidence
+		dst.Title = src.Title
+	}
+	dst.Count += src.Count
+	seenEvidence := map[string]bool{}
+	for _, e := range dst.Evidence {
+		seenEvidence[e] = true
+	}
+	for _, e := range src.Evidence {
+		if e == "" || seenEvidence[e] || len(dst.Evidence) >= 5 {
+			continue
+		}
+		dst.Evidence = append(dst.Evidence, e)
+		seenEvidence[e] = true
+	}
+}
+
+func applyTopologyCausalMerge(events []*model.RCAEvent, data RCAData) []*model.RCAEvent {
+	if len(events) == 0 || len(data.DependencyPeers) == 0 {
+		return events
+	}
+
+	depByEntity := map[string]model.RCADependencyPeer{}
+	for _, p := range data.DependencyPeers {
+		if !dependencyPeerUnhealthy(p) {
+			continue
+		}
+		depByEntity[p.ApplicationID] = p
+		if p.Name != "" {
+			depByEntity[p.Name] = p
+		}
+	}
+	if len(depByEntity) == 0 {
+		return events
+	}
+
+	var dependencyEvents []*model.RCAEvent
+	for _, e := range events {
+		if e.Category != "Dependency" {
+			continue
+		}
+		if _, ok := depByEntity[e.Entity]; ok {
+			dependencyEvents = append(dependencyEvents, e)
+		}
+	}
+	if len(dependencyEvents) == 0 {
+		return events
+	}
+
+	for _, symptom := range events {
+		if !topologySymptomCategory(symptom.Category) || symptom.Category == "Dependency" {
+			continue
+		}
+		parent := bestTopologyParent(symptom, dependencyEvents, depByEntity)
+		if parent == nil {
+			continue
+		}
+		peer := depByEntity[parent.Entity]
+		symptom.Role = "symptom"
+		symptom.CausalParent = parent.Fingerprint
+		if peer.Path != "" {
+			symptom.PropagationPath = peer.Path
+		}
+		if parent.Role == "" {
+			parent.Role = "root_cause_candidate"
+		}
+		if peer.Path != "" {
+			parent.PropagationPath = peer.Path
+		}
+		parent.Confidence = math.Min(math.Max(parent.Confidence, symptom.Confidence+8), 100)
+		if symptom.Severity > parent.Severity {
+			parent.Severity = symptom.Severity
+		}
+		parent.Count += symptom.Count
+		addEventEvidence(parent, fmt.Sprintf("topology_causal_merge: %s symptom `%s` is linked to dependency `%s` via `%s`", symptom.Category, symptom.Title, parent.Entity, peer.Path))
+		for _, ev := range symptom.Evidence {
+			addEventEvidence(parent, ev)
+		}
+	}
+
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].Role != events[j].Role {
+			return events[i].Role == "root_cause_candidate"
+		}
+		if events[i].Confidence != events[j].Confidence {
+			return events[i].Confidence > events[j].Confidence
+		}
+		if events[i].Severity != events[j].Severity {
+			return events[i].Severity > events[j].Severity
+		}
+		return events[i].FirstSeen < events[j].FirstSeen
+	})
+	return events
+}
+
+func dependencyPeerUnhealthy(p model.RCADependencyPeer) bool {
+	return p.AppStatus == "critical" || p.AppStatus == "warning" || p.ConnectionStatus == "critical" || p.ConnectionStatus == "warning"
+}
+
+func topologySymptomCategory(category string) bool {
+	switch category {
+	case "HTTP", "Latency", "Network", "Traces":
+		return true
+	default:
+		return false
+	}
+}
+
+func bestTopologyParent(symptom *model.RCAEvent, dependencyEvents []*model.RCAEvent, depByEntity map[string]model.RCADependencyPeer) *model.RCAEvent {
+	var best *model.RCAEvent
+	bestScore := -1.0
+	for _, dep := range dependencyEvents {
+		if !eventWindowsClose(dep, symptom, 300) {
+			continue
+		}
+		peer := depByEntity[dep.Entity]
+		score := dep.Confidence
+		if peer.Direction == "upstream" {
+			score += 15
+		}
+		if peer.Hop > 0 {
+			score -= float64(peer.Hop-1) * 8
+		}
+		if peer.ConnectionStatus == "critical" || peer.AppStatus == "critical" {
+			score += 10
+		}
+		if score > bestScore {
+			best = dep
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func addEventEvidence(event *model.RCAEvent, evidence string) {
+	if event == nil || evidence == "" {
+		return
+	}
+	for _, existing := range event.Evidence {
+		if existing == evidence {
+			return
+		}
+	}
+	if len(event.Evidence) < 8 {
+		event.Evidence = append(event.Evidence, evidence)
+	}
+}
+
+func applyRootCauseScoring(events []*model.RCAEvent, data RCAData) []*model.RCAEvent {
+	if len(events) == 0 {
+		return events
+	}
+
+	depByEntity := dependencyPeerIndex(data.DependencyPeers)
+	childCount := map[string]int{}
+	impactedByParent := map[string]map[string]bool{}
+	earliestSymptom := int64(0)
+
+	for _, e := range events {
+		if topologySymptomCategory(e.Category) && e.FirstSeen > 0 && (earliestSymptom == 0 || e.FirstSeen < earliestSymptom) {
+			earliestSymptom = e.FirstSeen
+		}
+		if e.CausalParent == "" {
+			continue
+		}
+		childCount[e.CausalParent]++
+		if impactedByParent[e.CausalParent] == nil {
+			impactedByParent[e.CausalParent] = map[string]bool{}
+		}
+		if e.Entity != "" {
+			impactedByParent[e.CausalParent][e.Entity] = true
+		}
+	}
+
+	for _, e := range events {
+		score, factors := rootCauseScore(e, depByEntity, childCount[e.Fingerprint], len(impactedByParent[e.Fingerprint]), earliestSymptom)
+		e.RootCauseScore = math.Round(math.Min(math.Max(score, 0), 100))
+		e.ScoreFactors = factors
+	}
+
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].RootCauseScore != events[j].RootCauseScore {
+			return events[i].RootCauseScore > events[j].RootCauseScore
+		}
+		if events[i].Confidence != events[j].Confidence {
+			return events[i].Confidence > events[j].Confidence
+		}
+		if events[i].Severity != events[j].Severity {
+			return events[i].Severity > events[j].Severity
+		}
+		return events[i].FirstSeen < events[j].FirstSeen
+	})
+	return events
+}
+
+func dependencyPeerIndex(peers []model.RCADependencyPeer) map[string]model.RCADependencyPeer {
+	byEntity := map[string]model.RCADependencyPeer{}
+	for _, p := range peers {
+		if p.ApplicationID != "" {
+			byEntity[p.ApplicationID] = p
+		}
+		if p.Name != "" {
+			byEntity[p.Name] = p
+		}
+	}
+	return byEntity
+}
+
+func rootCauseScore(e *model.RCAEvent, depByEntity map[string]model.RCADependencyPeer, causalChildren, impactedChildren int, earliestSymptom int64) (float64, []string) {
+	var factors []string
+	score := 0.0
+
+	anomalyStrength := e.Confidence * 0.35
+	score += anomalyStrength
+	factors = append(factors, fmt.Sprintf("anomaly_strength=%.0f", anomalyStrength))
+
+	if e.Severity > 0 {
+		severityScore := float64(e.Severity) * 8
+		score += severityScore
+		factors = append(factors, fmt.Sprintf("severity=%.0f", severityScore))
+	}
+
+	if earliestSymptom > 0 && e.FirstSeen > 0 {
+		switch {
+		case e.FirstSeen < earliestSymptom:
+			score += 12
+			factors = append(factors, "temporal_precedence=12")
+		case e.FirstSeen == earliestSymptom:
+			score += 6
+			factors = append(factors, "temporal_alignment=6")
+		case e.FirstSeen <= earliestSymptom+120:
+			score += 3
+			factors = append(factors, "near_symptom_onset=3")
+		}
+	}
+
+	if p, ok := depByEntity[e.Entity]; ok {
+		topologyScore := 8.0
+		if p.Direction == "upstream" {
+			topologyScore += 12
+		}
+		if p.Hop > 0 {
+			topologyScore -= float64(p.Hop-1) * 5
+		}
+		if p.AppStatus == "critical" || p.ConnectionStatus == "critical" {
+			topologyScore += 8
+		}
+		if topologyScore > 0 {
+			score += topologyScore
+			factors = append(factors, fmt.Sprintf("topology_position=%.0f", topologyScore))
+		}
+	}
+
+	if causalChildren > 0 {
+		blast := math.Min(float64(causalChildren)*8+float64(impactedChildren)*4, 24)
+		score += blast
+		factors = append(factors, fmt.Sprintf("blast_radius=%.0f", blast))
+	}
+
+	if e.Category == "Deployment" {
+		score += 12
+		factors = append(factors, "change_correlation=12")
+	}
+
+	if e.Role == "root_cause_candidate" {
+		score += 10
+		factors = append(factors, "topology_causal_merge=10")
+	}
+
+	if e.Role == "symptom" || symptomPenaltyCategory(e.Category) {
+		penalty := 18.0
+		if e.CausalParent == "" && e.Category == "Network" {
+			penalty = 8
+		}
+		score -= penalty
+		factors = append(factors, fmt.Sprintf("symptom_penalty=-%.0f", penalty))
+	}
+
+	return score, factors
+}
+
+func symptomPenaltyCategory(category string) bool {
+	switch category {
+	case "HTTP", "Latency", "Traces":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildRCAProblem(events []*model.RCAEvent, data RCAData) *model.RCAProblem {
+	if len(events) == 0 {
+		return nil
+	}
+	root := events[0]
+	problem := &model.RCAProblem{
+		Title:     root.Title,
+		RootCause: root,
+		Impact:    buildRCAImpact(events, data),
+	}
+
+	entitySet := map[string]bool{}
+	evidenceSet := map[string]bool{}
+	for i, e := range events {
+		if i > 0 && len(problem.Contributors) < 5 {
+			problem.Contributors = append(problem.Contributors, e)
+		}
+		if len(problem.Timeline) < 10 {
+			problem.Timeline = append(problem.Timeline, e)
+		}
+		if e.Entity != "" && !entitySet[e.Entity] {
+			problem.ImpactedEntities = append(problem.ImpactedEntities, e.Entity)
+			entitySet[e.Entity] = true
+		}
+		for _, ev := range e.Evidence {
+			if ev == "" || evidenceSet[ev] || len(problem.Evidence) >= 8 {
+				continue
+			}
+			problem.Evidence = append(problem.Evidence, ev)
+			evidenceSet[ev] = true
+		}
+	}
+	sort.SliceStable(problem.Timeline, func(i, j int) bool {
+		return problem.Timeline[i].FirstSeen < problem.Timeline[j].FirstSeen
+	})
+	return problem
+}
+
+func buildRCAImpact(events []*model.RCAEvent, data RCAData) *model.RCAImpact {
+	entitySet := map[string]bool{}
+	entrySet := map[string]bool{}
+	pathSet := map[string]bool{}
+	maxSeverity := 0
+
+	for _, e := range events {
+		if e.Entity != "" {
+			entitySet[e.Entity] = true
+		}
+		if e.PropagationPath != "" {
+			pathSet[e.PropagationPath] = true
+		}
+		if e.Severity > maxSeverity {
+			maxSeverity = e.Severity
+		}
+	}
+	for _, p := range data.DependencyPeers {
+		if !dependencyPeerUnhealthy(p) {
+			continue
+		}
+		if p.ApplicationID != "" {
+			entitySet[p.ApplicationID] = true
+		}
+		if p.Direction == "downstream" && p.Name != "" {
+			entrySet[p.Name] = true
+		}
+		if p.Path != "" {
+			pathSet[p.Path] = true
+		}
+		if p.AppStatus == "critical" || p.ConnectionStatus == "critical" {
+			maxSeverity = max(maxSeverity, 2)
+		} else {
+			maxSeverity = max(maxSeverity, 1)
+		}
+	}
+	if len(entrySet) == 0 && data.ApplicationID != "" {
+		entrySet[data.ApplicationID] = true
+	}
+
+	impact := &model.RCAImpact{
+		AffectedEntities: len(entitySet),
+		EntryPoints:      sortedKeys(entrySet),
+		PropagationPaths: sortedKeys(pathSet),
+		Severity:         severityLabel(maxSeverity),
+	}
+	impact.Summary = fmt.Sprintf("%d entities affected; severity=%s", impact.AffectedEntities, impact.Severity)
+	if len(impact.PropagationPaths) > 0 {
+		impact.Summary += fmt.Sprintf("; %d propagation paths identified", len(impact.PropagationPaths))
+	}
+	return impact
+}
+
+func sortedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func severityLabel(sev int) string {
+	switch {
+	case sev >= 2:
+		return "critical"
+	case sev == 1:
+		return "warning"
+	default:
+		return "info"
+	}
 }
 
 func findingFixes(f finding) []string {
@@ -582,6 +1217,35 @@ func anomalyScore(s enrichedStats, severity int) float64 {
 	return math.Min(score, 100)
 }
 
+func signalChangeTime(s enrichedStats) int64 {
+	if s.changePoint > 0 {
+		return s.changePoint
+	}
+	if len(s.points) < 4 || s.max <= 0 {
+		return 0
+	}
+
+	values := make([]float64, len(s.points))
+	for i, p := range s.points {
+		values[i] = p.v
+	}
+	med := median(values)
+	spread := iqrSpread(values)
+	if spread == 0 {
+		spread = s.stddev
+	}
+	threshold := med + spread*2
+	if threshold <= 0 {
+		threshold = s.max * 0.5
+	}
+	for _, p := range s.points {
+		if p.v > 0 && p.v >= threshold {
+			return p.t
+		}
+	}
+	return 0
+}
+
 // --- Detectors ---
 
 // detectDependencyPropagation uses service-map edges from RCADependencyPeers (when World is available).
@@ -840,7 +1504,7 @@ func detectNetworkIssues(metrics map[string][]*model.MetricValues) []finding {
 			title:      fmt.Sprintf("TCP retransmissions to `%s`", dest),
 			detail:     fmt.Sprintf("Elevated TCP retransmissions to `%s` (avg %.1f/s, peak %.1f/s). This suggests packet loss, network congestion, or an overloaded remote service.", dest, s.avg, s.max),
 			evidence:   fmt.Sprintf("tcp_retransmits: avg=%.2f, max=%.2f, z-score=%.1f", s.avg, s.max, s.zScoreMax),
-			changeTime: s.changePoint,
+			changeTime: signalChangeTime(s),
 		}
 		f.score = anomalyScore(s, sev)
 		results = append(results, f)
@@ -861,7 +1525,7 @@ func detectNetworkIssues(metrics map[string][]*model.MetricValues) []finding {
 			title:      fmt.Sprintf("Connection failures to `%s`", dest),
 			detail:     fmt.Sprintf("TCP connections to `%s` are failing (avg %.2f/s, peak %.2f/s). The upstream service may be unreachable or refusing connections.", dest, s.avg, s.max),
 			evidence:   fmt.Sprintf("tcp_failed_connects: avg=%.2f, max=%.2f, z-score=%.1f", s.avg, s.max, s.zScoreMax),
-			changeTime: s.changePoint,
+			changeTime: signalChangeTime(s),
 		}
 		f.score = anomalyScore(s, 2)
 		results = append(results, f)
@@ -889,7 +1553,7 @@ func detectNetworkIssues(metrics map[string][]*model.MetricValues) []finding {
 			title:      fmt.Sprintf("Network latency to `%s` (avg %.1fms)", dest, s.avg*1000),
 			detail:     fmt.Sprintf("Network latency to `%s`: avg **%.1f ms**, peak **%.1f ms**. Burst ratio (P99/P50): **%.1fx**.", dest, s.avg*1000, s.max*1000, s.burstRatio),
 			evidence:   fmt.Sprintf("net_latency: avg=%.4fs, max=%.4fs, z-score=%.1f, burst_ratio=%.1f", s.avg, s.max, s.zScoreMax, s.burstRatio),
-			changeTime: s.changePoint,
+			changeTime: signalChangeTime(s),
 		}
 		f.score = anomalyScore(s, sev)
 		results = append(results, f)
@@ -918,7 +1582,7 @@ func detectHTTPErrors(metrics map[string][]*model.MetricValues) []finding {
 			title:      fmt.Sprintf("HTTP %s errors to `%s`", status, dest),
 			detail:     fmt.Sprintf("Server errors (HTTP %s) to `%s` at **%.1f req/s** average, peak **%.1f req/s**. Change-point confidence: **%.0f%%**.", status, dest, s.avg, s.max, s.changeScore*100),
 			evidence:   fmt.Sprintf("http_requests[status=%s]: avg=%.2f, max=%.2f, z-score=%.1f, change=%.2f", status, s.avg, s.max, s.zScoreMax, s.changeScore),
-			changeTime: s.changePoint,
+			changeTime: signalChangeTime(s),
 		}
 		f.score = anomalyScore(s, 2)
 		results = append(results, f)
@@ -943,12 +1607,124 @@ func detectLatencyDegradation(metrics map[string][]*model.MetricValues) []findin
 			title:      fmt.Sprintf("Latency degradation to `%s`", dest),
 			detail:     fmt.Sprintf("HTTP request latency to `%s` shows degradation: avg=%.4fs, peak=%.4fs (z-score=%.1f). Burst ratio: %.1fx.", dest, s.avg, s.max, s.zScoreMax, s.burstRatio),
 			evidence:   fmt.Sprintf("http_latency: avg=%.4f, max=%.4f, z-score=%.1f, change_score=%.2f", s.avg, s.max, s.zScoreMax, s.changeScore),
-			changeTime: s.changePoint,
+			changeTime: signalChangeTime(s),
 		}
 		f.score = anomalyScore(s, 1)
 		results = append(results, f)
 	}
 	return results
+}
+
+func detectMultivariateAnomalies(metrics map[string][]*model.MetricValues) []finding {
+	type metricSelector struct {
+		name   string
+		filter func(model.Labels) bool
+	}
+	type group struct {
+		title    string
+		category string
+		detail   string
+		metrics  []metricSelector
+		severity int
+	}
+
+	groups := []group{
+		{
+			title:    "Joint resource saturation signal",
+			category: "Anomaly",
+			detail:   "CPU, throttling, and memory signals shifted together. A joint change is more likely to represent resource saturation than an isolated metric spike.",
+			metrics: []metricSelector{
+				{name: "container_cpu_usage"},
+				{name: "container_throttled_time"},
+				{name: "container_memory_rss"},
+				{name: "container_memory_pressure"},
+			},
+			severity: 1,
+		},
+		{
+			title:    "Joint request degradation signal",
+			category: "HTTP",
+			detail:   "HTTP error and latency signals shifted together, suggesting a user-visible request degradation rather than a single noisy metric.",
+			metrics: []metricSelector{
+				{name: "container_http_requests_count", filter: func(labels model.Labels) bool {
+					return strings.HasPrefix(labelVal(labels, "status"), "5")
+				}},
+				{name: "container_http_requests_latency_total"},
+			},
+			severity: 2,
+		},
+		{
+			title:    "Joint network degradation signal",
+			category: "Network",
+			detail:   "Network retransmission, connection failure, and latency signals shifted together, which points to a connectivity or remote-service availability issue.",
+			metrics: []metricSelector{
+				{name: "container_net_tcp_retransmits"},
+				{name: "container_net_tcp_failed_connects"},
+				{name: "container_net_latency"},
+			},
+			severity: 1,
+		},
+	}
+
+	var results []finding
+	for _, g := range groups {
+		var series [][]tsPoint
+		var names []string
+		for _, m := range g.metrics {
+			pts := aggregateMetricSeries(metrics[m.name], m.filter)
+			if len(pts) < 8 {
+				continue
+			}
+			series = append(series, pts)
+			names = append(names, m.name)
+		}
+		if len(series) < 2 {
+			continue
+		}
+		cp, confidence, magnitude := multivariateBOCPDDetect(series, 50)
+		if cp == 0 || confidence < 0.2 {
+			continue
+		}
+		score := math.Min(35+confidence*45+magnitude*6+float64(g.severity)*8, 95)
+		results = append(results, finding{
+			severity:   g.severity,
+			category:   g.category,
+			title:      g.title,
+			detail:     fmt.Sprintf("%s Joint BOCPD change detected at **%s** with confidence **%.0f%%**.", g.detail, time.Unix(cp, 0).Format("15:04:05"), confidence*100),
+			evidence:   fmt.Sprintf("multivariate_bocpd: metrics=%s, confidence=%.2f, normalized_magnitude=%.2f", strings.Join(names, ","), confidence, magnitude),
+			changeTime: cp,
+			score:      score,
+		})
+	}
+	return results
+}
+
+func aggregateMetricSeries(values []*model.MetricValues, filter func(model.Labels) bool) []tsPoint {
+	byTime := map[int64]float64{}
+	for _, mv := range values {
+		if mv.Values == nil {
+			continue
+		}
+		if filter != nil && !filter(mv.Labels) {
+			continue
+		}
+		for _, p := range collectPoints(mv.Values) {
+			byTime[p.t] += p.v
+		}
+	}
+	if len(byTime) == 0 {
+		return nil
+	}
+	timestamps := make([]int64, 0, len(byTime))
+	for t := range byTime {
+		timestamps = append(timestamps, t)
+	}
+	sort.Slice(timestamps, func(i, j int) bool { return timestamps[i] < timestamps[j] })
+	points := make([]tsPoint, 0, len(timestamps))
+	for _, t := range timestamps {
+		points = append(points, tsPoint{t: t, v: byTime[t]})
+	}
+	return points
 }
 
 func detectKubernetesEvents(events []*model.LogEntry) []finding {

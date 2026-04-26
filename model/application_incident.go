@@ -23,6 +23,8 @@ type RCADependencyPeer struct {
 	ApplicationID    string `json:"application_id"`
 	Name             string `json:"name"`
 	Direction        string `json:"direction"` // "upstream" | "downstream"
+	Hop              int    `json:"hop,omitempty"`
+	Path             string `json:"path,omitempty"`
 	AppStatus        string `json:"app_status,omitempty"`
 	ConnectionStatus string `json:"connection_status,omitempty"`
 	ConnectionHint   string `json:"connection_hint,omitempty"`
@@ -38,11 +40,13 @@ type RCA struct {
 	PropagationMap    *PropagationMap `json:"propagation_map"`
 	Widgets           []*Widget       `json:"widgets"`
 
-	CausalFindings   []*CausalFinding    `json:"causal_findings,omitempty"`
-	RankedCauses     []*RankedCause      `json:"ranked_causes,omitempty"`
-	RelatedLogs      []*RCALogEntry      `json:"related_logs,omitempty"`
-	RelatedTraces    []*RCATraceEntry    `json:"related_traces,omitempty"`
-	DependencyPeers  []RCADependencyPeer `json:"dependency_peers,omitempty"`
+	CausalFindings  []*CausalFinding    `json:"causal_findings,omitempty"`
+	RankedCauses    []*RankedCause      `json:"ranked_causes,omitempty"`
+	RelatedLogs     []*RCALogEntry      `json:"related_logs,omitempty"`
+	RelatedTraces   []*RCATraceEntry    `json:"related_traces,omitempty"`
+	DependencyPeers []RCADependencyPeer `json:"dependency_peers,omitempty"`
+	Events          []*RCAEvent         `json:"events,omitempty"`
+	Problem         *RCAProblem         `json:"problem,omitempty"`
 }
 
 type CausalFinding struct {
@@ -63,6 +67,48 @@ type RankedCause struct {
 	Detail     string  `json:"detail"`
 }
 
+type RCAEvent struct {
+	Fingerprint     string   `json:"fingerprint"`
+	Source          string   `json:"source"`
+	Entity          string   `json:"entity"`
+	Category        string   `json:"category"`
+	Title           string   `json:"title"`
+	Severity        int      `json:"severity"`
+	Confidence      float64  `json:"confidence"`
+	RootCauseScore  float64  `json:"root_cause_score,omitempty"`
+	ScoreFactors    []string `json:"score_factors,omitempty"`
+	FirstSeen       int64    `json:"first_seen,omitempty"`
+	LastSeen        int64    `json:"last_seen,omitempty"`
+	Count           int      `json:"count"`
+	Role            string   `json:"role,omitempty"`
+	CausalParent    string   `json:"causal_parent,omitempty"`
+	PropagationPath string   `json:"propagation_path,omitempty"`
+	Evidence        []string `json:"evidence,omitempty"`
+}
+
+type RCAProblem struct {
+	Title            string      `json:"title"`
+	Status           string      `json:"status,omitempty"`
+	OpenedAt         int64       `json:"opened_at,omitempty"`
+	UpdatedAt        int64       `json:"updated_at,omitempty"`
+	Revision         int         `json:"revision,omitempty"`
+	UpdateCount      int         `json:"update_count,omitempty"`
+	RootCause        *RCAEvent   `json:"root_cause,omitempty"`
+	Contributors     []*RCAEvent `json:"contributors,omitempty"`
+	ImpactedEntities []string    `json:"impacted_entities,omitempty"`
+	Impact           *RCAImpact  `json:"impact,omitempty"`
+	Evidence         []string    `json:"evidence,omitempty"`
+	Timeline         []*RCAEvent `json:"timeline,omitempty"`
+}
+
+type RCAImpact struct {
+	AffectedEntities int      `json:"affected_entities"`
+	EntryPoints      []string `json:"entry_points,omitempty"`
+	PropagationPaths []string `json:"propagation_paths,omitempty"`
+	Severity         string   `json:"severity"`
+	Summary          string   `json:"summary"`
+}
+
 type RCALogEntry struct {
 	Timestamp string `json:"timestamp"`
 	Severity  string `json:"severity"`
@@ -71,11 +117,11 @@ type RCALogEntry struct {
 }
 
 type RCATraceEntry struct {
-	TraceID  string  `json:"trace_id"`
-	Service  string  `json:"service"`
-	Duration string  `json:"duration"`
-	Time     string  `json:"time"`
-	Status   string  `json:"status"`
+	TraceID  string `json:"trace_id"`
+	Service  string `json:"service"`
+	Duration string `json:"duration"`
+	Time     string `json:"time"`
+	Status   string `json:"status"`
 }
 
 type PropagationMap struct {

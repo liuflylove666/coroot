@@ -136,6 +136,8 @@ func mergeTwoStageResults(builtin, llm *model.RCA) *model.RCA {
 		RelatedLogs:     builtin.RelatedLogs,
 		RelatedTraces:   builtin.RelatedTraces,
 		DependencyPeers: builtin.DependencyPeers,
+		Events:          builtin.Events,
+		Problem:         builtin.Problem,
 	}
 	return merged
 }
@@ -155,6 +157,14 @@ func preferNonEmpty(a, b string) string {
 //
 // No raw metrics, no raw Kubernetes events, no raw trace spans.
 func buildFindingsPrompt(rca *model.RCA, data RCAData) string {
+	const (
+		maxPromptDependencyPeers = 25
+		maxPromptCausalFindings  = 8
+		maxPromptRankedCauses    = 8
+		maxPromptRelatedLogs     = 10
+		maxPromptRelatedTraces   = 8
+	)
+
 	var sb strings.Builder
 	duration := data.To.Sub(data.From)
 
@@ -167,24 +177,75 @@ func buildFindingsPrompt(rca *model.RCA, data RCAData) string {
 	sb.WriteString("(BARO change-point detection, IQR scoring, dependency-graph traversal, and cross-signal correlation). ")
 	sb.WriteString("Your task is to explain them clearly and suggest remediation.\n\n")
 
+	if rca.Problem != nil && rca.Problem.RootCause != nil {
+		sb.WriteString("## Problem Object\n\n")
+		sb.WriteString(fmt.Sprintf("**Problem:** %s\n", rca.Problem.Title))
+		if rca.Problem.Status != "" {
+			sb.WriteString(fmt.Sprintf("**Lifecycle:** status=%s, revision=%d, updates=%d\n", rca.Problem.Status, rca.Problem.Revision, rca.Problem.UpdateCount))
+		}
+		sb.WriteString(fmt.Sprintf("**Root cause candidate:** [%s] %s on `%s` (root score: %.0f, confidence: %.0f%%)\n",
+			rca.Problem.RootCause.Category, rca.Problem.RootCause.Title, rca.Problem.RootCause.Entity, rca.Problem.RootCause.RootCauseScore, rca.Problem.RootCause.Confidence))
+		if len(rca.Problem.RootCause.ScoreFactors) > 0 {
+			sb.WriteString(fmt.Sprintf("**Root score factors:** %s\n", strings.Join(rca.Problem.RootCause.ScoreFactors, ", ")))
+		}
+		if len(rca.Problem.ImpactedEntities) > 0 {
+			sb.WriteString(fmt.Sprintf("**Impacted entities:** %s\n", strings.Join(rca.Problem.ImpactedEntities, ", ")))
+		}
+		if rca.Problem.Impact != nil {
+			sb.WriteString(fmt.Sprintf("**Impact:** %s\n", rca.Problem.Impact.Summary))
+			if len(rca.Problem.Impact.EntryPoints) > 0 {
+				sb.WriteString(fmt.Sprintf("**Entry points:** %s\n", strings.Join(rca.Problem.Impact.EntryPoints, ", ")))
+			}
+			if len(rca.Problem.Impact.PropagationPaths) > 0 {
+				sb.WriteString("**Propagation paths:**\n")
+				limit := minInt(len(rca.Problem.Impact.PropagationPaths), 5)
+				for i := 0; i < limit; i++ {
+					sb.WriteString(fmt.Sprintf("- %s\n", rca.Problem.Impact.PropagationPaths[i]))
+				}
+			}
+		}
+		if len(rca.Problem.Evidence) > 0 {
+			sb.WriteString("**Evidence chain:**\n")
+			limit := minInt(len(rca.Problem.Evidence), 5)
+			for i := 0; i < limit; i++ {
+				sb.WriteString(fmt.Sprintf("- `%s`\n", rca.Problem.Evidence[i]))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
 	if len(rca.DependencyPeers) > 0 {
 		sb.WriteString("## Dependency Graph (service map edges)\n\n")
-		for _, p := range rca.DependencyPeers {
-			line := fmt.Sprintf("- **%s** `%s` — app: %s", p.Direction, p.Name, p.AppStatus)
+		limit := minInt(len(rca.DependencyPeers), maxPromptDependencyPeers)
+		for i := 0; i < limit; i++ {
+			p := rca.DependencyPeers[i]
+			line := fmt.Sprintf("- **%s** `%s`", p.Direction, p.Name)
+			if p.Hop > 0 {
+				line += fmt.Sprintf(" (hop %d)", p.Hop)
+			}
+			line += fmt.Sprintf(" — app: %s", p.AppStatus)
 			if p.ConnectionStatus != "" {
 				line += fmt.Sprintf(", connection: %s", p.ConnectionStatus)
 			}
 			if p.ConnectionHint != "" {
 				line += fmt.Sprintf(" (%s)", p.ConnectionHint)
 			}
+			if p.Path != "" {
+				line += fmt.Sprintf(", path: %s", p.Path)
+			}
 			sb.WriteString(line + "\n")
+		}
+		if len(rca.DependencyPeers) > limit {
+			sb.WriteString(fmt.Sprintf("... and %d more dependency edges\n", len(rca.DependencyPeers)-limit))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(rca.CausalFindings) > 0 {
 		sb.WriteString("## Causal Findings (ranked by confidence)\n\n")
-		for i, f := range rca.CausalFindings {
+		limit := minInt(len(rca.CausalFindings), maxPromptCausalFindings)
+		for i := 0; i < limit; i++ {
+			f := rca.CausalFindings[i]
 			sevLabel := "info"
 			if f.Severity == 1 {
 				sevLabel = "warning"
@@ -207,28 +268,33 @@ func buildFindingsPrompt(rca *model.RCA, data RCAData) string {
 				sb.WriteString("\n")
 			}
 		}
+		if len(rca.CausalFindings) > limit {
+			sb.WriteString(fmt.Sprintf("... and %d lower-ranked findings omitted from the LLM prompt\n\n", len(rca.CausalFindings)-limit))
+		}
 	} else {
 		sb.WriteString("## Findings\n\nNo significant anomalies were detected by the analysis engine.\n\n")
 	}
 
 	if len(rca.RankedCauses) > 0 {
 		sb.WriteString("## Ranked Metric Anomalies\n\n")
-		for _, rc := range rca.RankedCauses {
+		limit := minInt(len(rca.RankedCauses), maxPromptRankedCauses)
+		for i := 0; i < limit; i++ {
+			rc := rca.RankedCauses[i]
 			sb.WriteString(fmt.Sprintf("- `%s`", rc.Metric))
 			if rc.Service != "" {
 				sb.WriteString(fmt.Sprintf(" (service: `%s`)", rc.Service))
 			}
 			sb.WriteString(fmt.Sprintf(" — confidence: %.0f%%, %s\n", rc.Confidence, rc.Detail))
 		}
+		if len(rca.RankedCauses) > limit {
+			sb.WriteString(fmt.Sprintf("... and %d more ranked metric anomalies\n", len(rca.RankedCauses)-limit))
+		}
 		sb.WriteString("\n")
 	}
 
 	if len(rca.RelatedLogs) > 0 {
 		sb.WriteString("## Related Log Entries\n\n")
-		limit := 15
-		if len(rca.RelatedLogs) < limit {
-			limit = len(rca.RelatedLogs)
-		}
+		limit := minInt(len(rca.RelatedLogs), maxPromptRelatedLogs)
 		for i := 0; i < limit; i++ {
 			l := rca.RelatedLogs[i]
 			sb.WriteString(fmt.Sprintf("- [%s] **%s** `%s`: %s\n", l.Timestamp, l.Severity, l.Service, l.Message))
@@ -241,10 +307,7 @@ func buildFindingsPrompt(rca *model.RCA, data RCAData) string {
 
 	if len(rca.RelatedTraces) > 0 {
 		sb.WriteString("## Related Traces\n\n")
-		limit := 10
-		if len(rca.RelatedTraces) < limit {
-			limit = len(rca.RelatedTraces)
-		}
+		limit := minInt(len(rca.RelatedTraces), maxPromptRelatedTraces)
 		for i := 0; i < limit; i++ {
 			t := rca.RelatedTraces[i]
 			sb.WriteString(fmt.Sprintf("- trace `%s` | service: `%s` | duration: %s | status: %s",
@@ -259,6 +322,13 @@ func buildFindingsPrompt(rca *model.RCA, data RCAData) string {
 
 	sb.WriteString("Based on the findings above, provide your explanation and remediation as a JSON object.\n")
 	return sb.String()
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func formatLabels(labels model.Labels) string {

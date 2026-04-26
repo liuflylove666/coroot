@@ -3,12 +3,6 @@
         <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text class="mt-2">
             {{ error }}
         </v-alert>
-        <v-alert v-if="disabled" color="info" outlined text>
-            Coroot Community Edition includes three predefined roles: Admin, Editor, and Viewer.
-            <br />
-            For more granular Role-Based Access Control (RBAC), upgrade to Coroot Enterprise (from $1 per CPU core/month).
-            <a href="https://coroot.com/account" target="_blank" class="font-weight-bold">Start</a> your free trial today.
-        </v-alert>
         <v-simple-table v-if="!error" dense class="table mt-5">
             <thead>
                 <tr>
@@ -17,7 +11,6 @@
                         <div class="d-flex">
                             <div>
                                 <span>{{ r.name }}</span>
-                                <span v-if="disabled && r.custom">*</span>
                             </div>
                             <div class="d-flex align-center">
                                 <v-btn v-if="r.custom" @click="edit(r)" x-small icon><v-icon x-small>mdi-pencil</v-icon></v-btn>
@@ -45,7 +38,6 @@
             </tbody>
         </v-simple-table>
         <v-btn v-if="!error" color="primary" @click="add()" small :disabled="disabled" class="mt-3">Add role</v-btn>
-        <div v-if="disabled" class="mt-2 grey--text">* - examples of fine-grained custom roles</div>
 
         <v-dialog v-model="form.active" max-width="800">
             <v-card class="pa-4">
@@ -116,9 +108,6 @@
                             </v-btn>
                         </tfoot>
                     </v-simple-table>
-                    <div v-if="disabled" class="mb-2 caption grey--text">
-                        This form is disabled because adjusting role permissions is not supported in the Coroot Community Edition.
-                    </div>
                     <v-alert v-if="form.error" color="red" icon="mdi-alert-octagon-outline" outlined text>{{ form.error }}</v-alert>
                     <v-alert v-if="form.message" color="green" outlined text>{{ form.message }}</v-alert>
                     <div class="d-flex align-center">
@@ -144,7 +133,7 @@ export default {
         return {
             loading: false,
             error: '',
-            disabled: this.$coroot.edition !== 'Enterprise',
+            disabled: false,
             roles: [],
             actions: [],
             scopes: [],

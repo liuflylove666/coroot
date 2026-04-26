@@ -70,6 +70,7 @@
                                     <thead>
                                         <tr>
                                             <th>方向</th>
+                                            <th>跳数</th>
                                             <th>服务</th>
                                             <th>应用状态</th>
                                             <th>连接</th>
@@ -79,10 +80,11 @@
                                     <tbody>
                                         <tr v-for="(p, i) in rca.summary.dependency_peers" :key="i">
                                             <td><span class="dep-dir">{{ p.direction }}</span></td>
-                                            <td class="dep-name">{{ p.name }}</td>
+                                            <td class="dep-hop">{{ p.hop || 1 }}</td>
+                                            <td class="dep-name" :title="p.path || p.name">{{ p.name }}</td>
                                             <td><span class="dep-st" :class="'dep-st-' + (p.app_status || 'unknown')">{{ p.app_status || '—' }}</span></td>
                                             <td><span class="dep-st" :class="'dep-st-' + (p.connection_status || 'unknown')">{{ p.connection_status || '—' }}</span></td>
-                                            <td class="dep-hint">{{ p.connection_hint || '—' }}</td>
+                                            <td class="dep-hint">{{ p.connection_hint || p.path || '—' }}</td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -603,6 +605,12 @@ export default {
 .dep-name {
     font-weight: 500;
     font-size: 12px;
+}
+.dep-hop {
+    color: grey;
+    font-family: monospace;
+    font-size: 12px;
+    text-align: center;
 }
 .dep-hint {
     color: grey;

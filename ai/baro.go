@@ -258,6 +258,86 @@ func robustScoreFromStats(pts []tsPoint) float64 {
 	return maxDev / iqr
 }
 
+// multivariateBOCPDDetect reduces several related metric streams to a robust
+// normalized vector magnitude, then applies BOCPD to detect joint shifts.
+func multivariateBOCPDDetect(series [][]tsPoint, hazardLambda float64) (int64, float64, float64) {
+	normalized := normalizeSeriesMagnitude(series)
+	if len(normalized) < 8 {
+		return 0, 0, 0
+	}
+
+	maxMagnitude := 0.0
+	for _, p := range normalized {
+		if p.v > maxMagnitude {
+			maxMagnitude = p.v
+		}
+	}
+
+	cp, confidence := bocpdDetect(normalized, hazardLambda)
+	if cp == 0 {
+		return 0, 0, maxMagnitude
+	}
+	if maxMagnitude < 1.5 {
+		confidence *= 0.5
+	}
+	return cp, math.Min(confidence*math.Min(maxMagnitude/2.5, 1.5), 1), maxMagnitude
+}
+
+func normalizeSeriesMagnitude(series [][]tsPoint) []tsPoint {
+	type acc struct {
+		sumSquares float64
+		count      int
+	}
+	byTime := map[int64]*acc{}
+
+	for _, pts := range series {
+		if len(pts) < 4 {
+			continue
+		}
+		values := make([]float64, len(pts))
+		for i, p := range pts {
+			values[i] = p.v
+		}
+		med := median(values)
+		spread := iqrSpread(values)
+		if spread == 0 {
+			spread = stdOf(values, meanOf(values))
+		}
+		if spread == 0 {
+			continue
+		}
+		for _, p := range pts {
+			z := (p.v - med) / spread
+			a := byTime[p.t]
+			if a == nil {
+				a = &acc{}
+				byTime[p.t] = a
+			}
+			a.sumSquares += z * z
+			a.count++
+		}
+	}
+
+	if len(byTime) == 0 {
+		return nil
+	}
+	timestamps := make([]int64, 0, len(byTime))
+	for t := range byTime {
+		timestamps = append(timestamps, t)
+	}
+	sort.Slice(timestamps, func(i, j int) bool { return timestamps[i] < timestamps[j] })
+
+	out := make([]tsPoint, 0, len(timestamps))
+	for _, t := range timestamps {
+		a := byTime[t]
+		if a.count < 2 {
+			continue
+		}
+		out = append(out, tsPoint{t: t, v: math.Sqrt(a.sumSquares / float64(a.count))})
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -311,9 +391,9 @@ func meanOf(data []float64) float64 {
 // This is a simplified version of Granger causality suitable for short time
 // series typical of incident windows (50-200 points). Instead of a full
 // autoregressive model, it uses:
-//   1. Change-point detection on both series
-//   2. Cross-correlation at multiple lags
-//   3. Transfer entropy approximation via conditional probability
+//  1. Change-point detection on both series
+//  2. Cross-correlation at multiple lags
+//  3. Transfer entropy approximation via conditional probability
 func GrangerCausalScore(cause, effect []tsPoint, maxLag int) float64 {
 	if len(cause) < 10 || len(effect) < 10 || maxLag < 1 {
 		return 0
@@ -401,5 +481,3 @@ func stdOf(data []float64, mean float64) float64 {
 	}
 	return math.Sqrt(sum / float64(len(data)-1))
 }
-
-
