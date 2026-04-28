@@ -14,6 +14,10 @@
             <Alerts />
         </template>
 
+        <template v-if="view === 'slo'">
+            <SLOReport />
+        </template>
+
         <template v-if="view === 'map'">
             <ServiceMap />
         </template>
@@ -61,6 +65,7 @@ import Application from '@/views/Application.vue';
 import Incidents from '@/views/Incidents.vue';
 import Incident from '@/views/Incident.vue';
 import Alerts from '@/views/Alerts.vue';
+import SLOReport from '@/views/SLOReport.vue';
 import ServiceMap from '@/views/ServiceMap.vue';
 import Traces from '@/views/Traces.vue';
 import Logs from '@/views/Logs.vue';
@@ -82,6 +87,7 @@ export default {
         Incidents,
         Incident,
         Alerts,
+        SLOReport,
         ServiceMap,
         Traces,
         Logs,

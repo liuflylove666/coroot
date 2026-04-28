@@ -21,6 +21,7 @@ type Overview struct {
 	Anomalies    []*AnomalyApplication       `json:"anomalies"`
 	FluxCD       []*FluxCDResource           `json:"fluxcd"`
 	Stability    *Stability                  `json:"stability"`
+	SLOReport    *SLOReport                  `json:"slo_report"`
 	Categories   []model.ApplicationCategory `json:"categories"`
 }
 
@@ -56,6 +57,8 @@ func Render(ctx context.Context, chs clickhouse.Clients, project *db.Project, w 
 		v.FluxCD = renderFluxCD(w)
 	case "stability":
 		v.Stability = renderStability(w)
+	case "slo":
+		v.SLOReport = renderSLOReport(w)
 	}
 	return v
 }
