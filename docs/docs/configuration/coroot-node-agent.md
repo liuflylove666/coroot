@@ -29,6 +29,7 @@ You can configure coroot-node-agent using command-line flags or environment vari
 | `--enable-java-tls` | `ENABLE_JAVA_TLS` | `false` | Enable Java TLS instrumentation via dynamic agent loading |
 | `--enable-java-async-profiler` | `ENABLE_JAVA_ASYNC_PROFILER` | `false` | Enable Java profiling via async-profiler (CPU, memory allocations, lock contention) |
 | `--go-heap-profiler` | `GO_HEAP_PROFILER` | `enabled` | Go heap profiling mode: `disabled`, `enabled` (passive), or `force` (enable profiling in all Go apps) |
+| `--instrumentation-delay` | `INSTRUMENTATION_DELAY` | `30s` | Delay before enabling Python GIL and Node.js event loop instrumentation, after a process is started |
 | `--container-allowlist` | `CONTAINER_ALLOWLIST` | – | List of allowed containers (regex patterns) |
 | `--container-denylist` | `CONTAINER_DENYLIST` | – | List of denied containers (regex patterns) |
 | `--skip-systemd-system-services` | `SKIP_SYSTEMD_SYSTEM_SERVICES` | `true` | Skip well-known systemd system services (apt, motd, udev, etc.) |
@@ -43,6 +44,7 @@ You can configure coroot-node-agent using command-line flags or environment vari
 | `--log-per-second` | `LOG_PER_SECOND` | `10.0` | Rate limit for logs per second |
 | `--log-burst` | `LOG_BURST` | `100` | Max burst for log rate limiting |
 | `--log-patterns-per-container` | `LOG_PATTERNS_PER_CONTAINER` | `256` | Max unique log patterns per container per level |
+| `--max-fqdns-per-container` | `MAX_FQDNS_PER_CONTAINER` | `50` | Max unique FQDN values per container in `container_dns_requests_total`; extras are bucketed under `~other` |
 | `--max-label-length` | `MAX_LABEL_LENGTH` | `4096` | Max metric label length |
 | `--collector-endpoint` | `COLLECTOR_ENDPOINT` | – | Unified base URL for telemetry export |
 | `--api-key` | `API_KEY` | – | Coroot API key |
