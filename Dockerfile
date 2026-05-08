@@ -5,7 +5,7 @@ RUN npm install
 COPY front/ .
 RUN npm run build-prod
 
-FROM golang:1.23-bullseye AS backend-builder
+FROM golang:1.25-bookworm AS backend-builder
 RUN apt update && apt install -y liblz4-dev
 WORKDIR /tmp/src
 COPY go.mod .
